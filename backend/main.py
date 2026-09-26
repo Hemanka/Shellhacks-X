@@ -2,7 +2,6 @@ import base64
 import json
 import os
 import re
-import socket
 import uuid
 from io import BytesIO
 from pathlib import Path
@@ -10,15 +9,16 @@ from time import perf_counter, time
 from typing import Any
 
 import requests
-import qrcode
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect, File, UploadFile
-from fastapi.responses import StreamingResponse, Response
+from fastapi import FastAPI, HTTPException, File, UploadFile
+from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field
 
+from .pairing import router as pairing_router
 from .navigation.navigator import CameraRelativeNavigator
+from .navigation.guidance import guidance_for_step
 from .navigation.types import NavigationAction, NavigationDecision, PerceptionState
 from .perception import (
     GEMINI_PERCEPTION_PROMPT,
@@ -32,11 +32,12 @@ from .traversability.segmenter import SegformerTraversabilitySegmenter
 
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
+load_dotenv(ROOT / ".env.local")
 
 app = FastAPI(title="Wayfinder Gemini API", version="0.1.0")
+app.include_router(pairing_router)
 GEMINI_URL_TEMPLATE = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 DEFAULT_GEMINI_MODELS = ("gemini-3.1-flash-lite", "gemini-3.5-flash-lite")
-pairing_sessions: dict[str, dict[str, WebSocket | None]] = {}
 ELEVENLABS_URL = "https://api.elevenlabs.io/v1/text-to-speech"
 ELEVENLABS_STT_URL = "https://api.elevenlabs.io/v1/speech-to-text"
 DEFAULT_ELEVENLABS_VOICE_ID = "JBFqnCBsd6RMkjVDRZzb"
@@ -133,6 +134,7 @@ def navigation_result(
     retry_after_ms: int = 0,
 ) -> dict[str, Any]:
     target = perception.target
+    guidance = guidance_for_step(decision, perception)
     result = {
         "frame_id": str(uuid.uuid4())[:8],
         "heading_deg": payload.heading_deg,
@@ -143,6 +145,7 @@ def navigation_result(
         },
         "perception": perception_to_dict(perception),
         "decision": serialize_decision(decision),
+        "guidance": guidance.to_dict(),
         "next_action": decision.action.value,
         "source": source,
         "model": model,
@@ -225,37 +228,6 @@ def gemini_key() -> str | None:
     return os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_VISION_API_KEY")
 
 
-@app.post("/api/pairing")
-def create_pairing(request: Request) -> dict[str, str]:
-    session_id = uuid.uuid4().hex[:12]
-    pairing_sessions[session_id] = {"pc": None, "mobile": None}
-    host = os.getenv("PAIR_HOST") or socket.gethostbyname(socket.gethostname())
-    scheme = os.getenv("PAIR_SCHEME", "http")
-    port = os.getenv("PAIR_PORT") or str(request.url.port or 8000)
-    port_suffix = "" if (scheme == "https" and port == "443") else f":{port}"
-    mobile_url = f"{scheme}://{host}{port_suffix}/mobile.html?session={session_id}"
-    qr = qrcode.make(mobile_url)
-    output = __import__("io").BytesIO()
-    qr.save(output, format="PNG")
-    return {"session_id": session_id, "mobile_url": mobile_url, "secure": str(scheme == "https").lower(), "qr_data_url": f"data:image/png;base64,{base64.b64encode(output.getvalue()).decode('ascii')}"}
-
-
-@app.websocket("/ws/pair/{session_id}")
-async def pairing_socket(websocket: WebSocket, session_id: str, role: str = "mobile") -> None:
-    if session_id not in pairing_sessions or role not in {"pc", "mobile"}:
-        await websocket.close(code=1008)
-        return
-    await websocket.accept()
-    pairing_sessions[session_id][role] = websocket
-    try:
-        while True:
-            message = await websocket.receive_json()
-            if role == "mobile" and message.get("type") == "frame":
-                pc = pairing_sessions[session_id].get("pc")
-                if pc:
-                    await pc.send_json({"type": "frame", "image_base64": message.get("image_base64", "")})
-    except (WebSocketDisconnect, RuntimeError):
-        pairing_sessions.get(session_id, {})[role] = None
 def elevenlabs_key() -> str | None:
     return os.getenv("ELEVENLABS_API_KEY")
 

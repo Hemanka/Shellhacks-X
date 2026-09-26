@@ -1,5 +1,7 @@
 .env
+.env.local
 __pycache__/
 *.pyc
 .venv/
+.runtime/
 walkable-debug*.png

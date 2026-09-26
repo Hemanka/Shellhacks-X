@@ -76,6 +76,7 @@ class AnalyzeFrameIntegrationTests(unittest.TestCase):
 
         self.assertEqual(result["decision"]["action"], "TURN_RIGHT")
         self.assertEqual(result["decision"]["voiceInstruction"], "Turn slightly right.")
+        self.assertEqual(result["guidance"]["spokenText"], "Obstacle ahead. Turn slightly right, then stop.")
         self.assertEqual(result["perception"]["obstacles"][0]["label"], "chair")
         self.assertEqual(result["source"], "gemini")
 
