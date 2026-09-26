@@ -16,6 +16,7 @@ class SegformerTraversabilitySegmenter:
         self._processor = None
         self._model = None
         self._device = None
+        self.grid = None
 
     def _load(self) -> None:
         if self._model is not None:
@@ -115,7 +116,7 @@ class SegformerTraversabilitySegmenter:
             )
             return np.asarray(resized, dtype=np.uint8) > 0
 
-        return TraversabilityMask(
+        mask = TraversabilityMask(
             width=width,
             height=height,
             candidate_walkable_mask=original_size(candidate),
@@ -124,3 +125,6 @@ class SegformerTraversabilitySegmenter:
             blocked_mask=original_size(blocked),
             inference_ms=inference_ms,
         )
+        grid = original_size(raw_candidate).astype(np.uint8)
+        self.grid = grid
+        return mask
