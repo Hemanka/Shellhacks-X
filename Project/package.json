@@ -1,0 +1,33 @@
+{
+  "name": "shellhacks-find-and-reach",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node node_modules/tsx/dist/cli.mjs watch server/index.ts",
+    "start": "node node_modules/tsx/dist/cli.mjs server/index.ts",
+    "build": "node node_modules/typescript/bin/tsc --noEmit && node node_modules/vite/bin/vite.js build",
+    "test": "node node_modules/tsx/dist/cli.mjs --test tests/*.test.ts client/*.test.ts",
+    "smoke": "node node_modules/tsx/dist/cli.mjs server/smoke.ts"
+  },
+  "dependencies": {
+    "@google/genai": "^1.0.0",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "sharp": "^0.33.5",
+    "ws": "^8.18.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.13.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@types/ws": "^8.5.14",
+    "@vitejs/plugin-react": "^4.3.4",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3",
+    "vite": "^6.1.0"
+  }
+}
