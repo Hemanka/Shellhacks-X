@@ -1,14 +1,16 @@
 import base64
 import json
 import os
+import socket
 import uuid
 from pathlib import Path
 from typing import Any
 
 import requests
+import qrcode
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import Response
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect, File, UploadFile
+from fastapi.responses import StreamingResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -17,6 +19,7 @@ load_dotenv(ROOT / ".env")
 
 app = FastAPI(title="Wayfinder Gemini API", version="0.1.0")
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent"
+pairing_sessions: dict[str, dict[str, WebSocket | None]] = {}
 ELEVENLABS_URL = "https://api.elevenlabs.io/v1/text-to-speech"
 ELEVENLABS_STT_URL = "https://api.elevenlabs.io/v1/speech-to-text"
 DEFAULT_ELEVENLABS_VOICE_ID = "JBFqnCBsd6RMkjVDRZzb"
@@ -62,6 +65,37 @@ def gemini_key() -> str | None:
     return os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_VISION_API_KEY")
 
 
+@app.post("/api/pairing")
+def create_pairing(request: Request) -> dict[str, str]:
+    session_id = uuid.uuid4().hex[:12]
+    pairing_sessions[session_id] = {"pc": None, "mobile": None}
+    host = os.getenv("PAIR_HOST") or socket.gethostbyname(socket.gethostname())
+    scheme = os.getenv("PAIR_SCHEME", "http")
+    port = os.getenv("PAIR_PORT") or str(request.url.port or 8000)
+    port_suffix = "" if (scheme == "https" and port == "443") else f":{port}"
+    mobile_url = f"{scheme}://{host}{port_suffix}/mobile.html?session={session_id}"
+    qr = qrcode.make(mobile_url)
+    output = __import__("io").BytesIO()
+    qr.save(output, format="PNG")
+    return {"session_id": session_id, "mobile_url": mobile_url, "secure": str(scheme == "https").lower(), "qr_data_url": f"data:image/png;base64,{base64.b64encode(output.getvalue()).decode('ascii')}"}
+
+
+@app.websocket("/ws/pair/{session_id}")
+async def pairing_socket(websocket: WebSocket, session_id: str, role: str = "mobile") -> None:
+    if session_id not in pairing_sessions or role not in {"pc", "mobile"}:
+        await websocket.close(code=1008)
+        return
+    await websocket.accept()
+    pairing_sessions[session_id][role] = websocket
+    try:
+        while True:
+            message = await websocket.receive_json()
+            if role == "mobile" and message.get("type") == "frame":
+                pc = pairing_sessions[session_id].get("pc")
+                if pc:
+                    await pc.send_json({"type": "frame", "image_base64": message.get("image_base64", "")})
+    except (WebSocketDisconnect, RuntimeError):
+        pairing_sessions.get(session_id, {})[role] = None
 def elevenlabs_key() -> str | None:
     return os.getenv("ELEVENLABS_API_KEY")
 

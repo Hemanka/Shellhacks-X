@@ -120,7 +120,7 @@
                 <span class="placeholder-kicker">CAMERA PREVIEW</span
                 ><strong>Press start to scan the room</strong
                 ><span>Detected objects will be outlined here.</span>
-                <button class="camera-button" id="camera-button" type="button">Enable camera</button>
+                <div class="camera-actions"><button class="camera-button" id="camera-button" type="button">Enable camera</button><button class="camera-button secondary" id="pair-button" type="button">Use phone camera</button></div>
               </div>
               <div class="detection-layer" id="detection-layer"></div>
               <div class="camera-readout">
@@ -128,6 +128,7 @@
                 ><span id="camera-label">AWAITING CAMERA</span>
               </div>
             </div>
+            <div class="pairing-panel" id="pairing-panel" hidden><div><strong>Scan with your phone</strong><span>Keep this page open. Your phone camera becomes the input.</span></div><img id="pairing-qr" alt="QR code to pair phone camera"><button class="close-pairing" id="close-pairing" type="button">Close</button></div>
           </section>
           <section class="panel map-panel">
             <div class="panel-heading">

@@ -9,6 +9,8 @@ const state = {
   stream: null,
   cameraActive: false,
   nextScanAt: null,
+  remoteSocket: null,
+  remoteFrame: null,
   listening: false,
 };
 const $ = (id) => document.getElementById(id);
@@ -16,6 +18,8 @@ const targetInput = $("target-input");
 const targetDisplay = $("target-display");
 const startButton = $("start-button");
 const cameraButton = $("camera-button");
+const pairButton = $("pair-button");
+const closePairing = $("close-pairing");
 const micButton = $("mic-button");
 const video = $("camera-feed");
 const canvas = document.createElement("canvas");
@@ -191,14 +195,23 @@ function addSightings(result) {
   renderRegistry();
 }
 async function analyzeFrame() {
-  if (!state.stream) {
+  if (!state.stream && !state.remoteFrame) {
     $("camera-label").textContent = "NO FRAME TO ANALYZE";
     setInstruction("Camera unavailable.", "Allow camera access before sending a frame to Gemini.", 0);
     return;
   }
-  canvas.width = video.videoWidth || 640;
-  canvas.height = video.videoHeight || 480;
-  canvas.getContext("2d").drawImage(video, 0, 0);
+  if (state.remoteFrame) {
+    const remoteImage = new Image();
+    remoteImage.src = state.remoteFrame;
+    await new Promise((resolve) => { remoteImage.onload = resolve; remoteImage.onerror = resolve; });
+    canvas.width = remoteImage.naturalWidth || 640;
+    canvas.height = remoteImage.naturalHeight || 480;
+    canvas.getContext("2d").drawImage(remoteImage, 0, 0);
+  } else {
+    canvas.width = video.videoWidth || 640;
+    canvas.height = video.videoHeight || 480;
+    canvas.getContext("2d").drawImage(video, 0, 0);
+  }
   setScanStatus("PROCESSING", "PROCESSING FRAME / GEMINI");
   const image = canvas.toDataURL("image/jpeg", 0.7);
   const response = await fetch("/api/analyze-frame", {
@@ -243,6 +256,27 @@ async function analyzeFrame() {
     );
     $("target-distance").textContent = "—";
   }
+}
+async function pairPhoneCamera() {
+  const response = await fetch("/api/pairing", { method: "POST" });
+  if (!response.ok) throw new Error("Could not create camera pairing");
+  const pairing = await response.json();
+  $("pairing-qr").src = pairing.qr_data_url;
+  $("pairing-panel").hidden = false;
+  const protocol = location.protocol === "https:" ? "wss" : "ws";
+  state.remoteSocket = new WebSocket(`${protocol}://${location.host}/ws/pair/${pairing.session_id}?role=pc`);
+  state.remoteSocket.onopen = () => setScanStatus("PHONE READY", "WAITING FOR PHONE CAMERA");
+  state.remoteSocket.onmessage = (event) => {
+    const message = JSON.parse(event.data);
+    if (message.type === "frame") {
+      state.remoteFrame = message.image_base64;
+      state.cameraActive = true;
+      $("connection-label").textContent = "PHONE CAMERA ACTIVE";
+      $("camera-placeholder").classList.add("hidden");
+      $("camera-placeholder").style.display = "none";
+      setScanStatus("READY", "PHONE FRAME RECEIVED");
+    }
+  };
 }
 async function connectCamera() {
   if (state.cameraActive) return true;
@@ -361,6 +395,8 @@ cameraButton.addEventListener("click", async () => {
     console.warn("Camera unavailable.", error);
   }
 });
+pairButton.addEventListener("click", () => pairPhoneCamera().catch((error) => setInstruction("Pairing unavailable.", error.message, 0)));
+closePairing.addEventListener("click", () => { $("pairing-panel").hidden = true; });
 startButton.addEventListener("click", () =>
   startSession().catch((error) => {
     if (state.cameraActive) {
