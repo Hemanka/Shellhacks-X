@@ -5,3 +5,4 @@ dist/
 *.log
 .runtime/
 coverage/
+__pycache__/
