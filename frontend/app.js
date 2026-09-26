@@ -14,10 +14,7 @@ const state = {
   remoteSocket: null,
   remoteFrame: null,
   listening: false,
-  analyzing: false,
-  backoffUntil: 0,
-  lastSpokenAction: null,
-  lastSpokenAt: 0,
+  quotaAnnounced: false,
 };
 const $ = (id) => document.getElementById(id);
 const targetInput = $("target-input");
@@ -314,31 +311,32 @@ async function analyzeFrame() {
       error.status = response.status;
       throw error;
     }
-    const result = await response.json();
-    await maskRequest;
-    addSightings(result);
-    if (result.rateLimited) {
-      const retryMs = Math.max(result.retryAfterMs || 30000, SCAN_INTERVAL_MS);
-      const retrySeconds = Math.ceil(retryMs / 1000);
-      state.backoffUntil = Date.now() + retryMs;
-      state.nextScanAt = state.backoffUntil;
-      setInstruction(
-        "Vision service is busy.",
-        `Hold your position. Retrying in about ${retrySeconds} seconds.`,
-        0,
-      );
-      setScanStatus("COOLDOWN", `GEMINI RATE LIMITED / RETRY IN ${retrySeconds}S`);
-      return;
-    }
-    state.backoffUntil = 0;
-    applyNavigationDecision(result);
-    state.nextScanAt = Date.now() + SCAN_INTERVAL_MS;
-    setScanStatus("WAITING 6S", `${result.decision.action} / WAITING 6S`);
-    $("heading-value").textContent =
-      `${String(Math.round(result.heading_deg + 360) % 360).padStart(3, "0")}°`;
-    console.info("Navigation cycle timings", result.timings);
-  } finally {
-    state.analyzing = false;
+    const error = new Error(detail);
+    error.status = response.status;
+    throw error;
+  }
+  const result = await response.json();
+  state.quotaAnnounced = false;
+  addSightings(result);
+  state.nextScanAt = Date.now() + 3000;
+  setScanStatus("WAITING 3S", `${result.candidates.length ? "TARGET BOX" : "NO TARGET"} / WAITING 3S`);
+  $("heading-value").textContent =
+    `${String(Math.round(result.heading_deg + 360) % 360).padStart(3, "0")}°`;
+  if (result.target_match.found) {
+    setInstruction(
+      "Target detected.",
+      `I found a ${targetInput.value}. Keep facing this direction.`,
+      result.target_match.match_confidence,
+    );
+    $("target-distance").textContent = "1.8m";
+    $("target-marker").style.left = `${62 + (state.sightings % 4) * 4}%`;
+  } else {
+    setInstruction(
+      "Turn right slowly.",
+      "I am scanning the next part of the room.",
+      0,
+    );
+    $("target-distance").textContent = "—";
   }
 }
 async function pairPhoneCamera() {
@@ -410,6 +408,7 @@ async function startSession() {
   $("session-state").textContent = "Scanning";
   $("start-label").textContent = "Pause session";
   $("connection-label").textContent = "VISION LOOP ACTIVE";
+  state.quotaAnnounced = false;
   setScanStatus("CAPTURING", "CAPTURING LIVE FRAME");
   if (!state.startedAt) {
     state.startedAt = Date.now();
@@ -437,12 +436,14 @@ async function startSession() {
     await analyzeFrame();
   } catch (error) {
     if (error.status === 429 || error.message.includes("quota")) {
-      state.running = false;
-      clearInterval(state.scanTimer);
-      $("session-state").textContent = "Quota reached";
-      $("start-label").textContent = "Retry later";
-      $("camera-label").textContent = "GEMINI QUOTA EXCEEDED";
-      $("scan-status").textContent = "QUOTA STOPPED";
+      $("session-state").textContent = "Scanning";
+      $("start-label").textContent = "Pause session";
+      setScanStatus("WAITING QUOTA", "CAMERA ACTIVE / GEMINI WAITING");
+      setInstruction("Waiting for Gemini quota.", "The camera is still active. Retrying in 3 seconds.", 0, false);
+      if (!state.quotaAnnounced) {
+        state.quotaAnnounced = true;
+        speak("Processing");
+      }
     } else {
       setScanStatus("RETRYING", "LIVE CAMERA / GEMINI RETRYING");
     }
@@ -459,12 +460,14 @@ async function startSession() {
     ) {
       analyzeFrame().catch((error) => {
         if (error.status === 429 || error.message.includes("quota")) {
-          state.running = false;
-          clearInterval(state.scanTimer);
-          $("session-state").textContent = "Quota reached";
-          $("start-label").textContent = "Retry later";
-          $("camera-label").textContent = "GEMINI QUOTA EXCEEDED";
-          $("scan-status").textContent = "QUOTA STOPPED";
+          $("session-state").textContent = "Scanning";
+          $("start-label").textContent = "Pause session";
+          setScanStatus("WAITING QUOTA", "CAMERA ACTIVE / GEMINI WAITING");
+          setInstruction("Waiting for Gemini quota.", "The camera is still active. Retrying in 3 seconds.", 0, false);
+          if (!state.quotaAnnounced) {
+            state.quotaAnnounced = true;
+            speak("Processing");
+          }
         } else {
           setScanStatus("RETRYING", "LIVE CAMERA / GEMINI RETRYING");
         }

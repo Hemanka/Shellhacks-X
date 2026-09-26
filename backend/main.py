@@ -34,8 +34,7 @@ ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 
 app = FastAPI(title="Wayfinder Gemini API", version="0.1.0")
-GEMINI_URL_TEMPLATE = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-DEFAULT_GEMINI_MODELS = ("gemini-3.1-flash-lite", "gemini-3.5-flash-lite")
+GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 pairing_sessions: dict[str, dict[str, WebSocket | None]] = {}
 ELEVENLABS_URL = "https://api.elevenlabs.io/v1/text-to-speech"
 ELEVENLABS_STT_URL = "https://api.elevenlabs.io/v1/speech-to-text"
@@ -385,6 +384,8 @@ def analyze_frame(payload: FrameRequest) -> dict[str, Any]:
         )
 
     image_bytes = decode_image(payload.image_base64)
+    model = os.getenv("VISION_MODEL", "gemini-3.5-flash-lite")
+    gemini_url = f"{GEMINI_BASE_URL}/{model}:generateContent"
     body = {
         "contents": [{"parts": [
             {"text": GEMINI_PERCEPTION_PROMPT.format(target=payload.target_object)},
@@ -406,20 +407,12 @@ def analyze_frame(payload: FrameRequest) -> dict[str, Any]:
     rate_limited = False
     retry_after_ms = 0
     try:
-        models = gemini_models()
-        response = None
-        for index, model in enumerate(models):
-            model_used = model
-            response = requests.post(
-                GEMINI_URL_TEMPLATE.format(model=model),
-                params={"key": api_key},
-                json=body,
-                timeout=12,
-            )
-            if response.status_code != 429 or index == len(models) - 1:
-                break
-            print(f"Gemini model {model} was rate limited; trying {models[index + 1]}.")
-        assert response is not None
+        response = requests.post(
+            gemini_url,
+            params={"key": api_key},
+            json=body,
+            timeout=12,
+        )
         response.raise_for_status()
         gemini_ms = (perf_counter() - gemini_started) * 1000
         raw = response.json()
