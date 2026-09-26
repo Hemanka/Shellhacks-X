@@ -59,6 +59,7 @@
   background: #ff8b5c;
   color: #fff;
 }
+.camera-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:center}.camera-button.secondary{background:#d4eee7;color:#0d6b68}.pairing-panel{display:flex;align-items:center;gap:18px;padding:16px;background:#edf5ef;border:1px solid #c9ddd3}.pairing-panel div{display:grid;gap:6px}.pairing-panel strong{font-size:14px}.pairing-panel span{font:10px "DM Mono";color:#71807d}.pairing-panel img{width:120px;height:120px;background:#fff;padding:6px}.close-pairing{margin-left:auto;border:0;background:transparent;color:#0d6b68;font:10px "DM Mono";cursor:pointer}.mobile-camera{min-height:100vh;background:#102a2a;color:#e4f1e9;font-family:Manrope,sans-serif}.mobile-camera main{max-width:520px;margin:auto;padding:28px 22px}.mobile-camera h1{font-size:34px;letter-spacing:-.05em}.mobile-camera #status{color:#a6c1b6}.mobile-camera video{width:100%;display:block;border-radius:8px;background:#172f2d;margin:24px 0}.mobile-camera button{border:0;border-radius:4px;padding:14px 18px;background:#f4c56a;color:#172622;font-weight:700;cursor:pointer}
 .camera-placeholder.hidden {
   display: none;
 }
