@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 
 app = FastAPI(title="Wayfinder Gemini API", version="0.1.0")
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent"
+GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 pairing_sessions: dict[str, dict[str, WebSocket | None]] = {}
 ELEVENLABS_URL = "https://api.elevenlabs.io/v1/text-to-speech"
 ELEVENLABS_STT_URL = "https://api.elevenlabs.io/v1/speech-to-text"
@@ -202,6 +202,8 @@ def analyze_frame(payload: FrameRequest) -> dict[str, Any]:
         return demo_result(payload.target_object, payload.heading_deg)
 
     image_bytes = decode_image(payload.image_base64)
+    model = os.getenv("VISION_MODEL", "gemini-3.5-flash-lite")
+    gemini_url = f"{GEMINI_BASE_URL}/{model}:generateContent"
     body = {
         "contents": [{"parts": [
             {"text": (
@@ -221,7 +223,7 @@ def analyze_frame(payload: FrameRequest) -> dict[str, Any]:
     }
     try:
         response = requests.post(
-            GEMINI_URL,
+            gemini_url,
             params={"key": api_key},
             json=body,
             timeout=12,
