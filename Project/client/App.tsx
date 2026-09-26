@@ -1,9 +1,12 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ClientMessage, Command, ServerMessage, Snapshot, Phase, CaptureRequest, CycleStatus } from '../shared/protocol';
 import { acceptsCommand, commandDeadline, fallbackGuidance, isMovement } from './guidanceSafety';
+import type { NavigationDecision } from '../navigation/types.js';
+import { decisionSpeaker } from './voice.js';
 
 const EMPTY: Snapshot = { revision: 0, phase: 'paused', target: null, command: null, observation: null, metrics: { frames: 0, visualCalls: 0, reasonCalls: 0, visualSkipped: 0, reasonSkipped: 0, tokens: 0, visionMs: 0, reasonMs: 0 } };
 const PHASE_LABEL: Record<Phase, string> = { searching: 'Finding your object', approaching: 'Approaching', stopping: 'Stopping', reaching: 'Reaching', complete: 'Object found', paused: 'Paused', recovering: 'Checking the view' };
+const MOCK_TURN_RIGHT: NavigationDecision = { action: 'TURN_RIGHT', confidence: 1, reason: 'PATH_AVAILABLE', path: [], nextCell: null, shouldReplan: true, timing: { preprocessingMs: 0, planningMs: 0, decisionMs: 0, totalMs: 0 } };
 type Hold = 'paused' | 'complete' | 'waiting' | null;
 type WakeLock = { release: () => Promise<void>; addEventListener: (name: string, fn: () => void) => void };
 
@@ -54,8 +57,6 @@ export default function App() {
   const [camera, setCamera] = useState<'off' | 'starting' | 'on'>('off');
   const [query, setQuery] = useState('');
   const [hand, setHand] = useState<'left' | 'right'>('right');
-  const [code, setCode] = useState('');
-  const [joining, setJoining] = useState(false);
   const [hasSession, setHasSession] = useState(false);
   const [notice, setNotice] = useState('');
   const [hold, setHold] = useState<Hold>('paused');
@@ -63,6 +64,8 @@ export default function App() {
   const [clock, setClock] = useState(0);
   const [wakeStatus, setWakeStatus] = useState('Not requested');
   const [transport, setTransport] = useState({ sent: 0, dropped: 0, width: 0, height: 0 });
+  const [voiceTestStatus, setVoiceTestStatus] = useState('Ready to test.');
+  const voiceTestMode = (location.hostname === '127.0.0.1' || location.hostname === 'localhost') && new URLSearchParams(location.search).has('voiceTest');
 
   const send = useCallback((message: ClientMessage) => {
     const ws = socketRef.current;
@@ -193,17 +196,14 @@ export default function App() {
     ws.onerror = () => { if (socketRef.current === ws && mountedRef.current) { setNotice('The live connection could not be established.'); stop('Connection unavailable.'); } };
   }, [stop]);
 
-  async function join(event: FormEvent) {
-    event.preventDefault();
-    if (joining) return;
-    setJoining(true); setNotice('');
-    try {
-      const response = await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ code }) });
-      if (!response.ok) throw new Error(response.status === 401 || response.status === 403 ? 'That access code wasn’t accepted. Try again.' : 'Unable to join. Check that the server is running.');
-      setCode(''); setAuthenticated(true); connect();
-    } catch (error) { setNotice(error instanceof Error ? error.message : 'Unable to join.'); }
-    finally { setJoining(false); }
-  }
+  useEffect(() => {
+    let cancelled = false;
+    void fetch('/api/session', { method: 'POST', credentials: 'same-origin' })
+      .then(response => response.ok ? response.json() : Promise.reject(new Error('Unable to start GuideSight.')))
+      .then(() => { if (!cancelled) { setAuthenticated(true); connect(); } })
+      .catch(error => { if (!cancelled) setNotice(error instanceof Error ? error.message : 'Unable to start GuideSight.'); });
+    return () => { cancelled = true; };
+  }, [connect]);
 
   async function startCamera() {
     setCamera('starting'); setNotice('');
@@ -325,56 +325,89 @@ export default function App() {
   const confirmedNear = snapshot.observation && (snapshot.observation.proximity === 'near' || (snapshot.observation.targetBox && (snapshot.observation.targetBox.right - snapshot.observation.targetBox.left >= .7 || snapshot.observation.targetBox.bottom - snapshot.observation.targetBox.top >= .7)));
   const displayedCommand = validCommand && (isMovement(validCommand) || confirmedNear) ? validCommand : null;
   const checking=activeRef.current&&cycle&&(['analyzing','verifying'].includes(cycle.status)||clock>=cycleDeadlineRef.current);
-  const cueActive=validCommand&&validCommand.action!=='HOLD'&&validCommand.action!=='NO_CHANGE'&&validCommand.reason!=='Movement expired; waiting for fresh frame.';
   const commandText = completed ? 'Object found.' : hold==='paused' ? 'Paused.' : lastCue || (snapshot.target?'Target selected.':'Scan slowly, then stop.');
   const reason = completed ? 'You confirmed the object. Guidance has ended.' : displayedCommand ? observedFallback?.reason || displayedCommand.reason : observedFallback?.reason || (expired ? 'That instruction expired. Waiting for a fresh view.' : validCommand?.reason || stopReason);
   const isStop = !displayedCommand || ['STOP', 'HOLD', 'NO_CHANGE', 'ADJUST_VIEW'].includes(displayedCommand.action);
   const connected = connection === 'online';
   const canGuide = camera === 'on' && connected && configured === true;
   const metrics = snapshot.metrics;
-  const stage = phase === 'reaching' ? 2 : phase === 'approaching' || phase === 'stopping' ? 1 : phase === 'complete' ? 3 : 0;
 
-  const guidancePanel = <section id="guidance" className={`guidance-card ${completed ? 'complete' : isStop ? 'stop-state' : 'active-state'}`} aria-label="Current guidance" tabIndex={-1}>
-            <div className="guidance-top"><span className="eyebrow">{lastCue&&!cueActive?'LAST INSTRUCTION · FINISHED':'YOUR NEXT STEP'}</span><span className="phase-pill">{waiting ? 'Checking view' : PHASE_LABEL[phase]}</span></div>
-            <div className="instruction" role="status" aria-live="off" aria-atomic="true"><span className="instruction-symbol" aria-hidden="true">{completed ? <Icon name="check" size={30} /> : validCommand?.action.includes('LEFT') ? '←' : validCommand?.action.includes('RIGHT') ? '→' : validCommand?.action.includes('UP') ? '↑' : validCommand?.action.includes('DOWN') ? '↓' : isStop ? <Icon name="pause" size={28} /> : <Icon name="arrow" size={30} />}</span><h2>{commandText}</h2><p>{completed ? reason : validCommand && isMovement(validCommand) ? 'Then stop.' : 'Wait for the next instruction.'}</p></div>
-            {activeRef.current&&cycle&&<p>{checking?'Checking…':cycle.status==='retry_wait'?`Retry in ${Math.round(cycle.delayMs/1000)} seconds.`:`Next check in ${Math.round(cycle.delayMs/1000)} seconds.`}</p>}
-            <span aria-live="polite" aria-atomic="true" style={{position:'absolute',width:1,height:1,overflow:'hidden',clipPath:'inset(50%)'}}><span key={announcement.id}>{announcement.text}</span></span>
-            <div className="journey" aria-label={`Progress: ${PHASE_LABEL[phase]}`}>{['Find', 'Approach', 'Reach'].map((label, index) => <div key={label} className={stage > index ? 'done' : stage === index ? 'current' : ''}><span>{stage > index ? <Icon name="check" size={12} /> : index + 1}</span>{label}</div>)}</div>
-            {authenticated && <div className="guidance-controls"><button className="button pause-button" disabled={!connected || completed || (hold === 'paused' && (!hasSession || !canGuide))} onClick={() => hold === 'paused' ? control('resume') : stop('You paused guidance. Stay still until you resume.')}><Icon name={hold === 'paused' ? 'play' : 'pause'} />{hold === 'paused' ? 'Resume' : 'Pause'}</button><button className="button found-button" disabled={!snapshot.target || completed} onClick={() => stop('Object found. You’re all set.', 'found')}><Icon name="check" />I found it</button></div>}
-            {authenticated && snapshot.target && <button className="text-button another-button" disabled={!canGuide} onClick={() => control('another')}><Icon name="refresh" size={15} />Choose another match</button>}
-          </section>;
+  async function testTurnRightVoice() {
+    setVoiceTestStatus('Generating “Turn right.” with ElevenLabs.');
+    try {
+      const measurement = await decisionSpeaker.speakDecision(MOCK_TURN_RIGHT);
+      if (!measurement) throw new Error('TURN_RIGHT has no speech mapping.');
+      setVoiceTestStatus(`Playback started. ElevenLabs latency: ${measurement.serverTtsLatencyMs?.toFixed(1) ?? 'unknown'} milliseconds.`);
+    } catch (error) {
+      setVoiceTestStatus(error instanceof Error ? error.message : 'Voice test failed.');
+    }
+  }
 
-  return <div className={`app-shell ${hasSession ? 'session-started' : ''}`}>
-    <a className="skip-link" href="#guidance">Skip to guidance</a>
-    <header className="header">
-      <a className="brand" href="#" aria-label="Find and Reach home"><span className="brand-mark"><Icon name="focus" size={26} /></span><span>find<span className="amp">&</span>reach<span className="brand-note">A little more independence.</span></span></a>
-      <div className={`connection-pill ${connected ? 'connected' : ''}`}><span className="status-dot" />{connected ? 'Connected' : connection === 'connecting' ? 'Connecting' : 'Offline'}</div>
+  const guidancePanel = <section id="guidance" className={`guidance-card ${completed ? 'complete' : isStop ? 'stop-state' : 'active-state'}`} aria-labelledby="guidance-heading" tabIndex={-1}>
+    <div className="guidance-top">
+      <p className="eyebrow">Current instruction</p>
+      <p className="phase-pill">{waiting ? 'Checking view' : PHASE_LABEL[phase]}</p>
+    </div>
+    <div className="instruction">
+      <span className="instruction-symbol" aria-hidden="true">{completed ? <Icon name="check" size={42} /> : validCommand?.action.includes('LEFT') ? '←' : validCommand?.action.includes('RIGHT') ? '→' : validCommand?.action.includes('UP') ? '↑' : validCommand?.action.includes('DOWN') ? '↓' : isStop ? <Icon name="pause" size={38} /> : <Icon name="arrow" size={42} />}</span>
+      <h2 id="guidance-heading">{commandText}</h2>
+      <p>{completed ? reason : validCommand && isMovement(validCommand) ? 'Complete this movement, then stop and wait.' : 'Stay still and wait for the next instruction.'}</p>
+    </div>
+    {activeRef.current && cycle && <p className="checking-status" role="status">{checking ? 'Checking the camera view.' : cycle.status === 'retry_wait' ? `Trying again in ${Math.round(cycle.delayMs / 1000)} seconds.` : `Next check in ${Math.round(cycle.delayMs / 1000)} seconds.`}</p>}
+    <div className="sr-only" aria-live="assertive" aria-atomic="true"><span key={announcement.id}>{announcement.text}</span></div>
+    {authenticated && <div className="guidance-controls">
+      <button className="button pause-button" disabled={!connected || completed || (hold === 'paused' && (!hasSession || !canGuide))} onClick={() => hold === 'paused' ? control('resume') : stop('You paused guidance. Stay still until you resume.')}>
+        <Icon name={hold === 'paused' ? 'play' : 'pause'} />{hold === 'paused' ? 'Resume guidance' : 'Pause guidance'}
+      </button>
+      <button className="button found-button" disabled={!snapshot.target || completed} onClick={() => stop('Object found. You’re all set.', 'found')}><Icon name="check" />I found it</button>
+    </div>}
+    {authenticated && snapshot.target && <button className="text-button another-button" disabled={!canGuide} onClick={() => control('another')}><Icon name="refresh" size={18} />Search for another match</button>}
+  </section>;
+
+  return <div className="app-shell">
+    <a className="skip-link" href="#main-content">Skip to main content</a>
+    <header className="header simple-header">
+      <div className="brand"><span className="brand-mark"><Icon name="focus" size={28} /></span><span>GuideSight</span></div>
     </header>
 
-    <main>
-      <div className="intro"><p className="eyebrow">YOUR WORLD, WITHIN REACH</p><h1>Let’s find what<br className="mobile-break" /> you’re looking for.</h1><p className="intro-copy">A live view. One clear step at a time.</p></div>
-      <div className={`workspace ${hasSession ? 'session-guidance' : ''}`}>{hasSession && guidancePanel}
-        <section className="view-card" aria-label="Live camera view">
-          <div className="view-top"><span><Icon name="camera" size={16} /> YOUR VIEW</span><span className={`live-label ${camera === 'on' ? 'is-live' : ''}`}><i />{camera === 'on' ? 'LIVE' : 'CAMERA OFF'}</span></div>
-          <div className={`camera-stage ${camera === 'on' ? 'camera-running' : ''}`}>
-            <video ref={videoRef} autoPlay playsInline muted aria-label="Rear camera preview" />
-            {camera !== 'on' && <div className="camera-placeholder"><div className="orbit"><Icon name="focus" size={42} /></div><h2>Your view starts here</h2><p>Place your phone with the rear camera<br />facing outward and the lens uncovered.</p>{authenticated && <button className="button primary" onClick={() => void startCamera()} disabled={camera === 'starting'}><Icon name="camera" />{camera === 'starting' ? 'Opening camera…' : 'Enable camera'}</button>}</div>}
-            <div className="view-corners" aria-hidden="true"><i /><i /><i /><i /></div>
-            {camera === 'on' && <div className="view-bottom"><span><Icon name="shield" size={15} />{activeRef.current ? 'Checking the live view' : 'Preview only · guidance paused'}</span><span>{transport.width ? `${transport.width} × ${transport.height}` : '720p capture'}</span></div>}
-          </div>
-          <div className="view-caption"><span className="caption-icon"><Icon name="focus" size={18} /></span><p>{snapshot.target ? <><strong>{snapshot.target.description}</strong><span>{snapshot.observation?.targetMatch === 'ambiguous' ? 'Match unclear — guidance will wait.' : snapshot.observation?.targetMatch === 'lost' ? 'Target no longer confirmed in view.' : 'Selected from the camera view.'}</span></> : <><strong>A familiar object. A fresh perspective.</strong><span>Describe what you need to find.</span></>}</p></div>
-        </section>
-
-        <div className="right-column">
-          {!authenticated ? <section className="panel join-panel"><p className="eyebrow">WELCOME IN</p><h2>Your next step starts here.</h2><p className="muted">Enter the session code from your host to connect your camera securely.</p><form onSubmit={event => void join(event)}><label htmlFor="access-code">Session code</label><input id="access-code" type="password" autoComplete="off" value={code} onChange={e => setCode(e.target.value)} required placeholder="Enter your access code" /><button className="button primary full" disabled={joining || !code.trim()}>{joining ? 'Connecting…' : 'Join session'}<Icon name="arrow" /></button></form><p className="small-note"><Icon name="shield" size={15} />Your camera starts only when you enable it.</p></section> : <section className="panel setup-panel" aria-label="Choose an object"><div className="section-title"><span className="section-number">01</span><h2>What would you like to find?</h2></div><form onSubmit={event => { event.preventDefault(); control('start'); }}><label htmlFor="object-query">Describe your object</label><div className="query-input"><input id="object-query" maxLength={120} value={query} onChange={e => setQuery(e.target.value)} placeholder="The blue mug, or the pizza box…" /><Icon name="focus" size={19} /></div><fieldset className="hand-options"><legend>Which hand will you use?</legend><div>{(['left', 'right'] as const).map(side => <label key={side} className={hand === side ? 'chosen' : ''}><input type="radio" name="hand" checked={hand === side} onChange={() => setHand(side)} /><span>{side === 'left' ? 'Left hand' : 'Right hand'}</span>{hand === side && <Icon name="check" size={16} />}</label>)}</div></fieldset><button className="button primary full" disabled={!canGuide || !query.trim()}>Find my object<Icon name="arrow" /></button></form>{!connected && <button className="text-button" onClick={connect}><Icon name="refresh" size={15} />Reconnect to the session</button>}{configured === false && <p className="setup-message">Your host needs to finish configuring the guidance server.</p>}</section>}
-
-          {!hasSession && guidancePanel}
-        </div>
+    <main id="main-content" tabIndex={-1}>
+      <div className="intro">
+        <h1>Find what you need.</h1>
+        <p>GuideSight gives you one instruction at a time.</p>
       </div>
-      {notice && <div className="notice" role="alert"><Icon name="shield" /><p>{notice}</p><button aria-label="Dismiss message" onClick={() => setNotice('')}>×</button></div>}
-      <section className="reassurance"><Icon name="shield" size={19} /><p><strong>You’re always in control.</strong> Guidance waits when the view is uncertain. Pause whenever you need to.</p></section>
-      <details className="diagnostics"><summary><span><Icon name="signal" size={17} />Session details</span><span>Live processing & connection</span></summary><div className="metric-grid">{[['Frames received', metrics.frames], ['Frames sent', transport.sent], ['Frames dropped', transport.dropped], ['Visual checks', metrics.visualCalls], ['Reason checks', metrics.reasonCalls], ['Visual checks skipped', metrics.visualSkipped], ['Reason checks skipped', metrics.reasonSkipped], ['Tokens used', metrics.tokens], ['Vision time', `${Math.round(metrics.visionMs)} ms`], ['Reason time', `${Math.round(metrics.reasonMs)} ms`], ['Cycle', cycle?.status || 'idle'], ['Revision', snapshot.revision], ['Instruction age', accepted ? `${Math.max(0, Math.round(clock - accepted.command.capturedAt))} ms` : '—'], ['Screen', wakeStatus]].map(([label, value]) => <div className="metric" key={label}><span>{label}</span><strong>{value}</strong></div>)}</div><div className="decision-detail"><h3>Latest observation</h3><pre>{JSON.stringify(snapshot.observation, null, 2)}</pre><h3>Decision reason</h3><p>{snapshot.command?.reason || 'No decision yet.'}</p></div><p className="diagnostic-note">One analysis image per check · one local verification image · movement cues expire after 2 seconds · no distance measurements</p></details>
+
+      {notice && <div className="notice" role="alert"><Icon name="shield" /><p>{notice}</p><button aria-label="Dismiss message" onClick={() => setNotice('')}>Dismiss</button></div>}
+
+      {!authenticated && <section className="panel task-card" role="status" aria-live="polite"><h2>Starting GuideSight</h2><p>Please wait a moment.</p></section>}
+
+      {authenticated && camera !== 'on' && <section className="panel task-card" aria-labelledby="camera-heading">
+        <h2 id="camera-heading">Ready to begin?</h2>
+        <p>Point the rear camera forward. GuideSight will ask for camera permission.</p>
+        <button className="button primary start-button" onClick={() => void startCamera()} disabled={camera === 'starting'}><Icon name="camera" />{camera === 'starting' ? 'Starting' : 'Start GuideSight'}</button>
+      </section>}
+
+      {authenticated && camera === 'on' && !hasSession && <section className="panel task-card" aria-labelledby="object-heading">
+        <h2 id="object-heading">What do you want to find?</h2>
+        <form onSubmit={event => { event.preventDefault(); control('start'); }}>
+          <label htmlFor="object-query">Object description</label>
+          <input id="object-query" maxLength={120} value={query} onChange={e => setQuery(e.target.value)} placeholder="For example, blue mug" />
+          <fieldset className="hand-options"><legend>Which hand will reach for the object?</legend><div>{(['left', 'right'] as const).map(side => <label key={side} className={hand === side ? 'chosen' : ''}><input type="radio" name="hand" checked={hand === side} onChange={() => setHand(side)} /><span>{side === 'left' ? 'Left hand' : 'Right hand'}</span></label>)}</div></fieldset>
+          <button className="button primary" disabled={!canGuide || !query.trim()}>Start guidance<Icon name="arrow" /></button>
+        </form>
+        {!connected && <button className="button secondary" onClick={connect}><Icon name="refresh" />Reconnect</button>}
+        {configured === false && <p className="setup-message" role="alert">The guidance server has not been configured.</p>}
+      </section>}
+
+      {hasSession && guidancePanel}
+
+      <video className="hidden-camera" ref={videoRef} autoPlay playsInline muted aria-hidden="true" />
+
+      <section className="safety-note" aria-labelledby="safety-heading"><Icon name="shield" size={24} /><div><h2 id="safety-heading">Stop if anything feels wrong</h2><p>This prototype can make mistakes. Do not use it near traffic or stairs.</p></div></section>
+
+      {voiceTestMode && <section className="panel voice-test" aria-labelledby="voice-test-heading"><h2 id="voice-test-heading">Voice milestone test</h2><p>This sends a mock TURN_RIGHT decision through the production speech mapper and backend.</p><button className="button secondary" onClick={() => void testTurnRightVoice()}>Test “Turn right” audio</button><p role="status" aria-live="assertive">{voiceTestStatus}</p></section>}
+
+      <details className="diagnostics"><summary>Developer session details</summary><div className="metric-grid">{[['Frames received', metrics.frames], ['Frames sent', transport.sent], ['Frames dropped', transport.dropped], ['Visual checks', metrics.visualCalls], ['Reason checks', metrics.reasonCalls], ['Cycle', cycle?.status || 'idle'], ['Revision', snapshot.revision], ['Screen', wakeStatus]].map(([label, value]) => <div className="metric" key={label}><span>{label}</span><strong>{value}</strong></div>)}</div><div className="decision-detail"><h3>Latest observation</h3><pre>{JSON.stringify(snapshot.observation, null, 2)}</pre><h3>Decision reason</h3><p>{snapshot.command?.reason || 'No decision yet.'}</p></div></details>
     </main>
-    <footer><span>find<span className="amp">&</span>reach</span><p>Made for the moments that matter.</p><span className="prototype-label">SHELLHACKS PROTOTYPE</span></footer>
+    <footer>GuideSight · ShellHacks prototype</footer>
   </div>;
 }

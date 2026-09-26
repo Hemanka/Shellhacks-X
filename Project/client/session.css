@@ -1,4 +1,1 @@
-:root{--text:#ecf6f4}
-.decision-detail{margin-top:20px}.decision-detail h3{font-size:13px;color:var(--muted)}.decision-detail pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;line-height:1.6;color:var(--muted)}.decision-detail p{font-size:13px}
-.session-guidance>.guidance-card{grid-column:2;grid-row:2}.session-guidance>.view-card{grid-column:1;grid-row:1/span 2}.session-guidance>.right-column{grid-column:2;grid-row:1}
-@media(max-width:680px){.session-started .intro{display:none}.session-started .header{height:72px}.session-guidance{margin-top:18px}.session-guidance>.guidance-card{width:100%}.session-started .guidance-card{padding:20px}.session-started .instruction{padding-top:18px;padding-bottom:18px}.session-started .journey{margin-top:14px}.session-started .guidance-controls{margin-top:18px}}
+/* Session-specific layout now lives in styles.css so every stage uses one linear flow. */

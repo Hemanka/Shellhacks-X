@@ -2,7 +2,7 @@ import 'dotenv/config';
 import dotenv from 'dotenv';
 import express from 'express';
 import { createServer } from 'node:http';
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { existsSync } from 'node:fs';
@@ -14,27 +14,33 @@ import { GeminiService, GeminiTransientError } from './gemini.js';
 import { PacedCycle } from './paced.js';
 import { CueGate } from './cueGate.js';
 import { canCarryObservationForward } from './gates.js';
+import { ElevenLabsService } from './elevenLabsService.js';
 import type { Frame, Metrics, Observation, ServerMessage } from '../shared/protocol.js';
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const requestedPort=process.env.PORT;
 dotenv.config({path:path.join(root,'.env.local'),override:true});
 const gemini=new GeminiService();
+const elevenLabs=new ElevenLabsService();
 const app=express(); app.disable('x-powered-by');
 app.use(express.json({limit:'4kb'}));
 const server=createServer(app);
-const accessCode=process.env.DEMO_ACCESS_CODE || '';
 const tokens=new Map<string,number>();
-const attempts=new Map<string,{count:number;until:number}>();
 const authorized=(cookie='')=>{const t=cookie.split(';').map(x=>x.trim()).find(x=>x.startsWith('demo='))?.slice(5);return !!t&&(tokens.get(t)||0)>Date.now();};
-app.get('/api/health',(_req,res)=>res.json({configured:gemini.configured&&!!accessCode}));
-app.post('/api/login',(req,res)=>{
- const ip=req.socket.remoteAddress||'local'; let a=attempts.get(ip); if(!a||a.until<Date.now()){a={count:0,until:Date.now()+60000};attempts.set(ip,a);} if(++a.count>10){res.status(429).json({error:'Wait a minute before trying again.'});return;}
- const code=typeof req.body?.code==='string'?req.body.code:'';
- const x=Buffer.from(code), y=Buffer.from(accessCode);
- if(!accessCode||x.length!==y.length||!timingSafeEqual(x,y)){res.status(401).json({error:'Check the demo access code.'});return;}
+app.get('/api/health',(_req,res)=>res.json({configured:gemini.configured}));
+app.post('/api/session',(req,res)=>{
  const token=randomBytes(32).toString('hex');tokens.set(token,Date.now()+12*3600000);
  res.setHeader('Set-Cookie',`demo=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200${req.headers['x-forwarded-proto']==='https'?'; Secure':''}`);res.json({ok:true});
+});
+const speechSchema=z.object({text:z.literal('Turn right.')}).strict();
+app.post('/api/speech',async(req,res)=>{
+ if(!authorized(req.headers.cookie)){res.status(401).json({error:'Session required.'});return;}
+ const parsed=speechSchema.safeParse(req.body);if(!parsed.success){res.status(400).json({error:'Unsupported speech instruction.'});return;}
+ if(!elevenLabs.configured){res.status(503).json({error:'Voice service is not configured.'});return;}
+ try{
+  const result=await elevenLabs.synthesize(parsed.data.text);
+  res.setHeader('Content-Type','audio/mpeg');res.setHeader('Cache-Control','no-store');res.setHeader('X-TTS-Latency-Ms',result.latencyMs.toFixed(1));res.send(result.audio);
+ }catch{console.warn('[GuideSight Voice] ElevenLabs request failed.');res.status(502).json({error:'Voice generation failed.'});}
 });
 const wss=new WebSocketServer({noServer:true,maxPayload:400000});
 server.on('upgrade',(req,socket,head)=>{
@@ -55,7 +61,7 @@ wss.on('connection',ws=>{
  const active=()=>!disposed&&!['paused','complete'].includes(engine.phase)&&!!engine.query;
  const schedule=(delay=4000,retry=false)=>{cycle.schedule(delay,Date.now(),retry);publish();};
  const request=(purpose:'analysis'|'verification')=>{const m=cycle.request(purpose,Date.now());publish();send(m);};
- send({type:'ready',configured:gemini.configured&&!!accessCode});publish();
+ send({type:'ready',configured:gemini.configured});publish();
  ws.on('message',data=>{
   void(async()=>{
    let messageRevision=engine.revision;
@@ -138,4 +144,4 @@ app.use(express.static(path.join(root,'dist')));
 app.get('*',(req,res)=>{if(existsSync(path.join(root,'dist/index.html')))res.sendFile(path.join(root,'dist/index.html'));else res.status(503).send('Build the frontend with pnpm build first.');});
 app.use((_err:unknown,_req:express.Request,res:express.Response,_next:express.NextFunction)=>res.status(400).json({error:'Invalid request.'}));
 const port=Number(requestedPort||process.env.PORT||3000);
-server.listen(port,'127.0.0.1',()=>console.log(`Find & Reach: http://127.0.0.1:${port} | Gemini ${gemini.configured?'configured':'key missing'} | access code ${accessCode?'configured':'missing'}`));
+server.listen(port,'127.0.0.1',()=>console.log(`GuideSight: http://127.0.0.1:${port} | Gemini ${gemini.configured?'configured':'key missing'}`));

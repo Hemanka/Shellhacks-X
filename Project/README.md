@@ -2,6 +2,21 @@
 
 Text-first camera guidance prototype: type a target, automatically select a visible instance, approach, then guide the free hand until **Found it**. Start with stationary pizza boxes on a table in a cleared room. This is a development demo, not validated mobility assistance.
 
+## Mock-grid navigation engine
+
+The independent decision engine lives in `navigation/`. It accepts a structured occupancy grid, user pose, target and timestamp, replans with four-direction A* on every `decide` call, and returns one next action. Unknown cells are blocked by default; obstacle clearance, unknown traversal cost, confidence threshold and arrival radius are configurable.
+
+```ts
+import { Navigator } from './navigation/index.js';
+
+const navigator = new Navigator();
+const decision = navigator.decide(state);
+```
+
+Run `pnpm test` for all tests and `pnpm nav:benchmark` for the debug grid and timing benchmark.
+
+For downstream voice or logging integration, `navigator.decideJson(state)` returns a versioned JSON envelope containing the next action, confidence, reason, full path, next cell, replanning flag, and timing data. Run `pnpm nav:json` to print an example. The navigation module intentionally provides action data rather than generating spoken text.
+
 ## Run on Windows
 
 Install Node.js 22+ and pnpm. From this directory:
@@ -23,9 +38,11 @@ Open the printed HTTPS URL in Safari on the iPhone. Keep the laptop running and 
 
 ## Private configuration
 
-Copy `.env.example` to `.env.local` only if `.env.local` does not already exist. Fill `GEMINI_API_KEY` and `DEMO_ACCESS_CODE` in your local editor. The code defaults to `gemini-3.8-flash`; this demo's private configuration uses `gemini-3.1-flash-lite` for both roles after live latency checks. These model names are configurable because account availability varies. Restart the server after changing configuration.
+Copy `.env.example` to `.env.local` only if `.env.local` does not already exist. Fill `GEMINI_API_KEY` in your local editor. The code defaults to `gemini-3.8-flash`; this demo's private configuration uses `gemini-3.1-flash-lite` for both roles after live latency checks. These model names are configurable because account availability varies. Restart the server after changing configuration.
 
-Never put a key in a `VITE_` variable or enter it into the browser. The frontend asks only for the demo access code. The backend keeps keys and target reference crops private. The environment file is ignored by Git; `.env.example` contains no credentials.
+Never put a key in a `VITE_` variable or enter it into the browser. The browser automatically receives a short-lived, same-origin session cookie; there is no access-code screen. The backend keeps keys and target reference crops private. The environment file is ignored by Git; `.env.example` contains no credentials.
+
+For the first ElevenLabs milestone, also set backend-only `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID`. The server uses the low-latency `eleven_flash_v2_5` model. Restart the server, then open `http://127.0.0.1:3000/?voiceTest=1` and press **Test “Turn right” audio**. The development control sends a mock `TURN_RIGHT` navigation decision through the real mapper, protected backend endpoint, and browser audio playback path.
 
 ```powershell
 node node_modules/tsx/dist/cli.mjs server/smoke.ts
@@ -36,7 +53,7 @@ The smoke check calls both Gemini roles using a synthetic image; it does not upl
 
 ## Demo flow
 
-1. Enter the demo code. Allow the rear camera. Choose which free hand will reach; hold the phone with the other hand.
+1. Press **Start GuideSight** and allow the rear camera. Choose which free hand will reach; hold the phone with the other hand.
 2. Type `pizza box` and start. Keep the phone pointing forward in line with the torso during approach.
 3. The app selects the usable match nearest image center. **Find another** explicitly starts a new selection; ambiguity never silently changes the target.
 4. Follow one short text cue. “Next check in 2 seconds” is static timing text. When it changes to “Stop—checking your view,” stay still until the next result. API response time varies.
@@ -64,7 +81,7 @@ Models run on Google's service; the laptop does not need a GPU. Two concurrent s
 ## Verification recorded during implementation
 
 - Type checking and production frontend build passed; 17 controller, gate, client freshness, HTTP authentication, and WebSocket tests passed.
-- Temporary HTTPS endpoint returned 200; authenticated WSS handshake succeeded with a Secure/HttpOnly/SameSite cookie.
+- Temporary HTTPS endpoint returned 200; the automatic session and WSS handshake succeeded with an HttpOnly/SameSite cookie.
 - Current image plus selected crop using Flash-Lite produced several successful combined vision/reasoning checks around 1.8–3.0 seconds. Additional reaching checks included one timeout; latency is variable.
 - A bounded replay of a frame from the user-provided third-person demo exercised the actual running server and Gemini: automatic selection → near stop → reaching → explicit Found it completion. Observed visual inference was about 1.6–2.6 seconds. This did not exercise real walking or first-person hand correction.
 - First-person iPhone camera behavior, instruction quality while moving, and three complete physical acceptance runs remain unverified. A working link is not evidence that these passed.

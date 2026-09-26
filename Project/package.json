@@ -7,6 +7,8 @@
     "start": "node node_modules/tsx/dist/cli.mjs server/index.ts",
     "build": "node node_modules/typescript/bin/tsc --noEmit && node node_modules/vite/bin/vite.js build",
     "test": "node node_modules/tsx/dist/cli.mjs --test tests/*.test.ts client/*.test.ts",
+    "nav:benchmark": "node node_modules/tsx/dist/cli.mjs navigation/benchmark.ts",
+    "nav:json": "node node_modules/tsx/dist/cli.mjs navigation/json-demo.ts",
     "smoke": "node node_modules/tsx/dist/cli.mjs server/smoke.ts"
   },
   "dependencies": {

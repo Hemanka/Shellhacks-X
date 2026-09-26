@@ -2,10 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
-import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import dotenv from 'dotenv';
 import WebSocket from 'ws';
 import type { ServerMessage, Snapshot } from '../shared/protocol.js';
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
@@ -15,23 +13,21 @@ async function rejectedSocket(url:string,origin:string,cookie?:string):Promise<n
  ws.on('error',()=>{});ws.on('unexpected-response',(_req,res)=>{clearTimeout(timeout);resolve(res.statusCode??0);res.destroy();});
  ws.on('open',()=>{clearTimeout(timeout);ws.close();reject(Error('Unauthorized WebSocket opened'));});
 });}
-test('real server HTTP authentication, WebSocket origin/auth, revision controls and malformed messages', {timeout:15000}, async t=>{
- // Credentials stay in memory and are never printed or included in assertion messages.
- let local:Record<string,string>={};try{local=dotenv.parse(readFileSync(path.join(root,'.env.local')));}catch{}
- const code=local.DEMO_ACCESS_CODE||process.env.DEMO_ACCESS_CODE||'isolated-test-access';
+test('real server automatic session, WebSocket origin checks, revision controls and malformed messages', {timeout:15000}, async t=>{
  const port=await unusedPort();const base=`http://127.0.0.1:${port}`,socketUrl=`ws://127.0.0.1:${port}/stream`;
- const child=spawn(process.execPath,['--import','tsx','server/index.ts'],{cwd:root,env:{...process.env,PORT:String(port),DEMO_ACCESS_CODE:code},stdio:'ignore'});
+ const child=spawn(process.execPath,['--import','tsx','server/index.ts'],{cwd:root,env:{...process.env,PORT:String(port),ELEVENLABS_API_KEY:'',ELEVENLABS_VOICE_ID:''},stdio:'ignore'});
  let ws:WebSocket|undefined;
  t.after(async()=>{ws?.terminate();child.kill();await Promise.race([new Promise<void>(r=>child.once('close',()=>r())),new Promise<void>(r=>setTimeout(r,1000))]);});
  let up=false;
  for(let i=0;i<50;i++){try{const response=await fetch(`${base}/api/health`);if(response.ok){up=true;break;}}catch{}await new Promise(r=>setTimeout(r,100));}
  assert.equal(up,true,'Isolated server should become ready');
  const health=await (await fetch(`${base}/api/health`)).json();assert.deepEqual(Object.keys(health),['configured']);assert.equal(typeof health.configured,'boolean');
- const denied=await fetch(`${base}/api/login`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:'deliberately-wrong-access'})});assert.equal(denied.status,401);
  assert.equal(await rejectedSocket(socketUrl,base),403);
- const login=await fetch(`${base}/api/login`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code})});assert.equal(login.status,200,'Configured login should succeed');
- const setCookie=login.headers.get('set-cookie')||'';assert.equal(setCookie.includes('HttpOnly'),true);assert.equal(setCookie.includes('SameSite=Strict'),true);const cookie=setCookie.split(';')[0];
+ const unauthorizedSpeech=await fetch(`${base}/api/speech`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:'Turn right.'})});assert.equal(unauthorizedSpeech.status,401);
+ const session=await fetch(`${base}/api/session`,{method:'POST'});assert.equal(session.status,200,'Automatic session should succeed');
+ const setCookie=session.headers.get('set-cookie')||'';assert.equal(setCookie.includes('HttpOnly'),true);assert.equal(setCookie.includes('SameSite=Strict'),true);const cookie=setCookie.split(';')[0];
  assert.equal(await rejectedSocket(socketUrl,'https://other-origin.invalid',cookie),403);
+ const missingVoice=await fetch(`${base}/api/speech`,{method:'POST',headers:{'Content-Type':'application/json',Cookie:cookie},body:JSON.stringify({text:'Turn right.'})});assert.equal(missingVoice.status,503);
  ws=new WebSocket(socketUrl,{origin:base,headers:{Cookie:cookie}});
  const messages:ServerMessage[]=[];ws.on('message',data=>messages.push(JSON.parse(data.toString()) as ServerMessage));
  await new Promise<void>((r,j)=>{ws!.once('open',r);ws!.once('error',j);});
