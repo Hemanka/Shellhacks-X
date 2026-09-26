@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#102a2a" />
+    <title>Wayfinder | Blind Navigation Assistant</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/camera.css?v=2" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark">W</span><span>WAYFINDER</span>
+        </div>
+        <div class="system-status">
+          <span class="status-dot"></span
+          ><span id="connection-label">LOCAL SYSTEM READY</span>
+        </div>
+      </header>
+
+      <section class="hero-row">
+        <div>
+          <p class="eyebrow">ASSISTED NAVIGATION / SESSION 014</p>
+          <h1>Find your way<br /><em>with confidence.</em></h1>
+          <p class="lede">
+            Describe what you need. Wayfinder scans the space, builds a living
+            map, and speaks one clear next step at a time.
+          </p>
+        </div>
+        <div class="session-card">
+          <div class="session-label">SESSION STATUS</div>
+          <div class="session-state" id="session-state">Idle</div>
+          <div class="session-meta">
+            <span id="session-time">00:00</span><span>·</span
+            ><span id="detection-count">0 sightings</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="workspace-grid">
+        <div class="control-column">
+          <section class="panel target-panel">
+            <div class="panel-heading">
+              <span class="panel-index">01</span>
+              <h2>What are we finding?</h2>
+            </div>
+            <label class="target-input"
+              ><span class="sr-only">Target object</span
+              ><input id="target-input" value="red coffee mug" /><button
+                id="mic-button"
+                class="icon-button"
+                title="Speak target"
+                aria-label="Speak target"
+              >
+                MIC
+              </button></label
+            >
+            <div class="voice-line">
+              <span class="pulse" id="voice-pulse"></span
+              ><span id="voice-label">Tap the mic or type a target</span>
+            </div>
+            <button class="primary-button" id="start-button">
+              <span class="button-icon">+</span
+              ><span id="start-label">Start finding</span>
+            </button>
+          </section>
+
+          <section class="panel guidance-panel">
+            <div class="panel-heading">
+              <span class="panel-index">02</span>
+              <h2>Live guidance</h2>
+              <span class="live-badge">LIVE</span>
+            </div>
+            <div class="instruction" id="instruction">Ready when you are.</div>
+            <div class="instruction-sub" id="instruction-sub">
+              Your next spoken direction will appear here.
+            </div>
+            <div class="direction-row">
+              <div>
+                <span class="metric-label">HEADING</span
+                ><strong id="heading-value">000°</strong>
+              </div>
+              <div>
+                <span class="metric-label">TARGET</span
+                ><strong id="target-distance">—</strong>
+              </div>
+              <div>
+                <span class="metric-label">CONFIDENCE</span
+                ><strong id="confidence-value">—</strong>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <div class="visual-column">
+          <section class="panel camera-panel">
+            <div class="panel-heading">
+              <span class="panel-index">03</span>
+              <h2>Camera view</h2>
+              <span class="map-caption">VISION / ALL OBJECTS</span>
+            </div>
+            <div class="camera-stage" id="camera-stage">
+              <video id="camera-feed" autoplay muted playsinline></video>
+              <div class="camera-placeholder" id="camera-placeholder">
+                <span class="placeholder-kicker">CAMERA PREVIEW</span
+                ><strong>Press start to scan the room</strong
+                ><span>Detected objects will be outlined here.</span>
+                <button class="camera-button" id="camera-button" type="button">Enable camera</button>
+              </div>
+              <div class="detection-layer" id="detection-layer"></div>
+              <div class="camera-readout">
+                <span id="frame-label">NO FRAME</span
+                ><span id="camera-label">AWAITING CAMERA</span>
+              </div>
+            </div>
+          </section>
+          <section class="panel map-panel">
+            <div class="panel-heading">
+                <span class="panel-index">04</span>
+              <h2>Spatial map</h2>
+              <span class="map-caption">OBJECT REGISTRY / BEV</span>
+            </div>
+            <div class="map-stage" id="map-stage">
+              <div class="map-grid-lines"></div>
+              <div class="north-label">N</div>
+              <div class="user-marker" id="user-marker"><span></span></div>
+              <div class="target-marker" id="target-marker">
+                <span></span><b id="target-map-label">TARGET</b>
+              </div>
+              <div class="map-legend">
+                <span><i class="legend-user"></i> YOU</span
+                ><span><i class="legend-target"></i> TARGET</span
+                ><span><i class="legend-obstacle"></i> DETECTED</span>
+              </div>
+            </div>
+            <div class="registry-header">
+              <span>REGISTRY</span
+              ><span id="registry-count">0 OBJECTS TRACKED</span>
+            </div>
+            <div class="registry-list" id="registry-list">
+              <div class="empty-registry">
+                No objects registered yet. Start a scan to populate the room.
+              </div>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <footer>
+        <span>WAYFINDER BUILD 0.1</span
+        ><span>VOICE-FIRST · PRIVACY AWARE · LOCAL MAP</span>
+      </footer>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>
