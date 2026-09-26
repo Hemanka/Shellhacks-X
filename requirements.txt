@@ -4,3 +4,7 @@ python-dotenv==1.0.1
 requests==2.32.3
 python-multipart==0.0.20
 qrcode[pil]==8.2
+numpy==2.4.6
+torch==2.10.0
+torchvision==0.25.0
+transformers==5.17.0

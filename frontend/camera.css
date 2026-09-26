@@ -16,6 +16,26 @@
   object-fit: cover;
   background: #1c302e;
 }
+.remote-camera-frame,
+.traversability-overlay {
+  position: absolute;
+  inset: 0;
+  display: none;
+  width: 100%;
+  height: 390px;
+  object-fit: cover;
+}
+.remote-camera-frame.active,
+.traversability-overlay.active {
+  display: block;
+}
+.traversability-overlay {
+  z-index: 2;
+  pointer-events: none;
+}
+.remote-camera-frame {
+  z-index: 1;
+}
 .camera-placeholder {
   position: absolute;
   inset: 0;
@@ -67,6 +87,20 @@
   position: absolute;
   inset: 0;
   pointer-events: none;
+  z-index: 3;
+}
+.traversability-readout {
+  position: absolute;
+  z-index: 4;
+  top: 12px;
+  left: 14px;
+  padding: 6px 8px;
+  color: #e7fff1;
+  background: rgba(9, 35, 29, 0.78);
+  border-left: 3px solid #2ddc73;
+  font: 9px "DM Mono";
+  letter-spacing: 0.08em;
+  text-shadow: 0 1px 3px #000;
 }
 .detection-box {
   position: absolute;
@@ -102,6 +136,7 @@
   font: 9px "DM Mono";
   letter-spacing: 0.1em;
   text-shadow: 0 1px 4px #000;
+  z-index: 4;
 }
 .camera-panel .panel-heading {
   margin-bottom: 18px;
@@ -111,5 +146,9 @@
   .camera-stage video {
     height: 300px;
     min-height: 300px;
+  }
+  .remote-camera-frame,
+  .traversability-overlay {
+    height: 300px;
   }
 }
