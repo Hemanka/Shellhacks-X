@@ -8,6 +8,7 @@ const state = {
   scanTimer: null,
   stream: null,
   cameraActive: false,
+  nextScanAt: null,
 };
 const $ = (id) => document.getElementById(id);
 const targetInput = $("target-input");
@@ -34,6 +35,14 @@ function updateClock() {
   const elapsed = Math.floor((Date.now() - state.startedAt) / 1000);
   $("session-time").textContent =
     `${String(Math.floor(elapsed / 60)).padStart(2, "0")}:${String(elapsed % 60).padStart(2, "0")}`;
+  if (state.running && state.nextScanAt) {
+    const seconds = Math.max(0, Math.ceil((state.nextScanAt - Date.now()) / 1000));
+    $("scan-status").textContent = seconds ? `WAITING ${seconds}S` : "CAPTURING";
+  }
+}
+function setScanStatus(status, cameraText = status) {
+  $("scan-status").textContent = status;
+  $("camera-label").textContent = cameraText;
 }
 function renderRegistry() {
   const list = $("registry-list");
@@ -56,9 +65,7 @@ function renderDetections(candidates) {
   layer.innerHTML = candidates
     .map((candidate) => {
       const [x, y, width, height] = candidate.bbox;
-      const targetWords = targetInput.value.toLowerCase().split(" ").filter((word) => word.length > 2);
-      const isTarget = targetWords.some((word) => candidate.label.toLowerCase().includes(word));
-      return `<div class="detection-box ${isTarget ? "target-detection" : ""}" data-object-label="${candidate.label}" style="left:${x * 100}%;top:${y * 100}%;width:${width * 100}%;height:${height * 100}%"><span>${candidate.label.toUpperCase()} · ${Math.round(candidate.score * 100)}%</span></div>`;
+      return `<div class="detection-box target-detection" data-object-label="${candidate.label}" style="left:${x * 100}%;top:${y * 100}%;width:${width * 100}%;height:${height * 100}%"><span>${candidate.label.toUpperCase()} · ${Math.round(candidate.score * 100)}%</span></div>`;
     })
     .join("");
 }
@@ -69,7 +76,7 @@ function addSightings(result) {
   renderDetections(result.candidates);
   $("frame-label").textContent = `FRAME ${result.frame_id.toUpperCase()}`;
   $("camera-label").textContent =
-    `${result.candidates.length} OBJECT BOX${result.candidates.length === 1 ? "" : "ES"}`;
+    `${result.candidates.length} TARGET BOX${result.candidates.length === 1 ? "" : "ES"}`;
   if (state.cameraActive) $("camera-placeholder").classList.add("hidden");
   result.candidates.slice(0, 5).forEach((candidate) => {
     if (!state.registry.some((item) => item.label === candidate.label))
@@ -92,6 +99,7 @@ async function analyzeFrame() {
   canvas.width = video.videoWidth || 640;
   canvas.height = video.videoHeight || 480;
   canvas.getContext("2d").drawImage(video, 0, 0);
+  setScanStatus("PROCESSING", "PROCESSING FRAME / GEMINI");
   const image = canvas.toDataURL("image/jpeg", 0.7);
   const response = await fetch("/api/analyze-frame", {
     method: "POST",
@@ -115,6 +123,8 @@ async function analyzeFrame() {
   }
   const result = await response.json();
   addSightings(result);
+  state.nextScanAt = Date.now() + 3000;
+  setScanStatus("WAITING 3S", `${result.candidates.length ? "TARGET BOX" : "NO TARGET"} / WAITING 3S`);
   $("heading-value").textContent =
     `${String(Math.round(result.heading_deg + 360) % 360).padStart(3, "0")}°`;
   if (result.target_match.found) {
@@ -158,7 +168,7 @@ async function connectCamera() {
   $("camera-placeholder").classList.add("hidden");
   $("camera-placeholder").style.display = "none";
   $("connection-label").textContent = "LIVE CAMERA ACTIVE";
-  $("camera-label").textContent = "LIVE CAMERA / READY";
+  setScanStatus("READY", "LIVE CAMERA / READY");
   return true;
 }
 async function startSession() {
@@ -168,11 +178,14 @@ async function startSession() {
     $("start-label").textContent = "Resume finding";
     clearInterval(state.timer);
     clearInterval(state.scanTimer);
+    state.nextScanAt = null;
+    $("scan-status").textContent = "PAUSED";
     return;
   }
   $("session-state").textContent = "Scanning";
   $("start-label").textContent = "Pause session";
   $("connection-label").textContent = "VISION LOOP ACTIVE";
+  setScanStatus("CAPTURING", "CAPTURING LIVE FRAME");
   if (!state.startedAt) {
     state.startedAt = Date.now();
     state.timer = setInterval(updateClock, 1000);
@@ -205,8 +218,9 @@ async function startSession() {
       $("session-state").textContent = "Quota reached";
       $("start-label").textContent = "Retry later";
       $("camera-label").textContent = "GEMINI QUOTA EXCEEDED";
+      $("scan-status").textContent = "QUOTA STOPPED";
     } else {
-      $("camera-label").textContent = "LIVE CAMERA / GEMINI RETRYING";
+      setScanStatus("RETRYING", "LIVE CAMERA / GEMINI RETRYING");
     }
     setInstruction("Vision analysis unavailable.", error.message, 0);
     console.warn("Vision analysis failed.", error);
@@ -221,13 +235,14 @@ async function startSession() {
           $("session-state").textContent = "Quota reached";
           $("start-label").textContent = "Retry later";
           $("camera-label").textContent = "GEMINI QUOTA EXCEEDED";
+          $("scan-status").textContent = "QUOTA STOPPED";
         } else {
-          $("camera-label").textContent = "LIVE CAMERA / GEMINI RETRYING";
+          setScanStatus("RETRYING", "LIVE CAMERA / GEMINI RETRYING");
         }
         console.warn("Frame analysis failed.", error);
       });
     }
-  }, 10000);
+  }, 3000);
 }
 cameraButton.addEventListener("click", async () => {
   try {

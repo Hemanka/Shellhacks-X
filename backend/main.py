@@ -69,15 +69,12 @@ def analyze_frame(payload: FrameRequest) -> dict[str, Any]:
     body = {
         "contents": [{"parts": [
             {"text": (
-                "Analyze this entire camera frame for navigation. Detect every distinct visible physical "
-                "object in the scene, including furniture, electronics, people, wall-mounted items, and "
-                f"the requested target {payload.target_object!r} if it is visible. The target is not a filter: "
-                "always return all visible objects. "
+                "Analyze this camera frame for navigation. Look only for the requested target object "
+                f"{payload.target_object!r}. Do not detect, label, or return any other object. "
                 "Return only valid JSON matching this schema: "
                 '{"objects":[{"label":"string","confidence":0.0,"bbox":[x,y,width,height]}]}. '
-                "Use normalized coordinates from 0 to 1. Return one tight bounding box per distinct object, "
-                "including partially visible objects when enough of the object is identifiable. "
-                "Do not invent objects or return an empty list when visible objects are present."
+                "Use normalized coordinates from 0 to 1. Return at most one tight bounding box for the best "
+                "matching target. If the target is not clearly visible, return {\"objects\":[]} and do not invent it."
             )},
             {"inline_data": {"mime_type": "image/jpeg", "data": base64.b64encode(image_bytes).decode("ascii")}},
         ]}],
@@ -119,6 +116,7 @@ def analyze_frame(payload: FrameRequest) -> dict[str, Any]:
         })
 
     matches = [candidate for candidate in candidates if label_matches(candidate["label"], payload.target_object)]
+    candidates = matches[:1]
     confidence = max((candidate["score"] for candidate in matches), default=0)
     return {
         "frame_id": str(uuid.uuid4())[:8],
