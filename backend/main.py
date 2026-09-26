@@ -7,7 +7,8 @@ from typing import Any
 
 import requests
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -16,12 +17,20 @@ load_dotenv(ROOT / ".env")
 
 app = FastAPI(title="Wayfinder Gemini API", version="0.1.0")
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent"
+ELEVENLABS_URL = "https://api.elevenlabs.io/v1/text-to-speech"
+ELEVENLABS_STT_URL = "https://api.elevenlabs.io/v1/speech-to-text"
+DEFAULT_ELEVENLABS_VOICE_ID = "JBFqnCBsd6RMkjVDRZzb"
+MAX_VOICE_COMMAND_BYTES = 10 * 1024 * 1024
 
 
 class FrameRequest(BaseModel):
     image_base64: str = Field(min_length=1)
     target_object: str = Field(default="object", min_length=1, max_length=100)
     heading_deg: float = Field(default=0, ge=-360, le=360)
+
+
+class SpeechRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=500)
 
 
 def demo_result(target: str, heading: float) -> dict[str, Any]:
@@ -53,10 +62,103 @@ def gemini_key() -> str | None:
     return os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_VISION_API_KEY")
 
 
+def elevenlabs_key() -> str | None:
+    return os.getenv("ELEVENLABS_API_KEY")
+
+
 @app.get("/api/health")
 def health() -> dict[str, str | bool]:
     configured = bool(gemini_key())
-    return {"status": "ok", "gemini_configured": configured, "demo_mode": os.getenv("DEMO_MODE", "false").lower() == "true"}
+    return {
+        "status": "ok",
+        "gemini_configured": configured,
+        "elevenlabs_configured": bool(elevenlabs_key()),
+        "demo_mode": os.getenv("DEMO_MODE", "false").lower() == "true",
+    }
+
+
+@app.post("/api/speech")
+def create_speech(payload: SpeechRequest) -> Response:
+    """Generate a short spoken command without exposing the API key to the browser."""
+    api_key = elevenlabs_key()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="ElevenLabs text-to-speech is not configured")
+
+    voice_id = os.getenv("ELEVENLABS_VOICE_ID", DEFAULT_ELEVENLABS_VOICE_ID)
+    model_id = os.getenv("ELEVENLABS_MODEL_ID", "eleven_flash_v2_5")
+    try:
+        response = requests.post(
+            f"{ELEVENLABS_URL}/{voice_id}",
+            params={"output_format": "mp3_44100_128"},
+            headers={
+                "xi-api-key": api_key,
+                "Content-Type": "application/json",
+                "Accept": "audio/mpeg",
+            },
+            json={"text": payload.text.strip(), "model_id": model_id},
+            timeout=20,
+        )
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        detail = "ElevenLabs could not generate speech"
+        if exc.response is not None:
+            detail = f"ElevenLabs request failed ({exc.response.status_code})"
+        raise HTTPException(status_code=502, detail=detail) from exc
+
+    return Response(
+        content=response.content,
+        media_type=response.headers.get("content-type", "audio/mpeg"),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post("/api/transcribe")
+def transcribe_voice_command(file: UploadFile = File(...)) -> dict[str, str]:
+    """Transcribe a short voice command while keeping the ElevenLabs key server-side."""
+    api_key = elevenlabs_key()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="ElevenLabs speech-to-text is not configured")
+    if file.content_type and not file.content_type.startswith("audio/"):
+        raise HTTPException(status_code=415, detail="The uploaded command must be an audio file")
+
+    audio = file.file.read(MAX_VOICE_COMMAND_BYTES + 1)
+    if not audio:
+        raise HTTPException(status_code=400, detail="The voice command was empty")
+    if len(audio) > MAX_VOICE_COMMAND_BYTES:
+        raise HTTPException(status_code=413, detail="The voice command is too large")
+
+    try:
+        response = requests.post(
+            ELEVENLABS_STT_URL,
+            headers={"xi-api-key": api_key},
+            files={
+                "file": (
+                    file.filename or "voice-command.webm",
+                    audio,
+                    file.content_type or "audio/webm",
+                )
+            },
+            data={
+                "model_id": os.getenv("ELEVENLABS_STT_MODEL_ID", "scribe_v2"),
+                "language_code": "eng",
+                "tag_audio_events": "false",
+                "timestamps_granularity": "none",
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        transcript = response.json().get("text", "").strip()
+    except requests.RequestException as exc:
+        detail = "ElevenLabs could not transcribe the voice command"
+        if exc.response is not None:
+            detail = f"ElevenLabs transcription failed ({exc.response.status_code})"
+        raise HTTPException(status_code=502, detail=detail) from exc
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail="ElevenLabs returned an invalid transcript") from exc
+
+    if not transcript:
+        raise HTTPException(status_code=422, detail="No speech was detected")
+    return {"text": transcript}
 
 
 @app.post("/api/analyze-frame")
