@@ -166,33 +166,76 @@ footer {
   border-radius: 3px;
   letter-spacing: 0.1em;
 }
-.target-input {
-  display: flex;
+.voice-target {
   border-bottom: 2px solid var(--ink);
   padding-bottom: 13px;
-  gap: 10px;
 }
-.target-input input {
-  border: 0;
-  outline: 0;
-  background: none;
+.voice-target span {
+  color: var(--muted);
+  display: block;
+  font: 500 9px "DM Mono", monospace;
+  letter-spacing: 0.12em;
+  margin-bottom: 7px;
+}
+.voice-target strong {
   color: var(--ink);
+  display: block;
   font: 700 24px Manrope;
   letter-spacing: -0.04em;
-  width: 100%;
-  min-width: 0;
 }
-.icon-button {
+.voice-target strong.empty {
+  color: var(--muted);
+  font-weight: 600;
+}
+.voice-command-button {
+  align-items: center;
   border: 0;
   background: var(--mint);
   color: var(--teal);
-  font: 500 10px "DM Mono";
-  padding: 8px 9px;
   cursor: pointer;
+  display: flex;
+  gap: 13px;
+  margin-top: 17px;
+  padding: 15px;
+  text-align: left;
+  width: 100%;
+  border-radius: 4px;
 }
-.icon-button.active {
+.voice-command-button strong,
+.voice-command-button small {
+  display: block;
+}
+.voice-command-button strong {
+  font: 700 13px Manrope;
+}
+.voice-command-button small {
+  font: 10px "DM Mono", monospace;
+  margin-top: 3px;
+  opacity: 0.75;
+}
+.voice-command-icon {
+  background: var(--teal);
+  border-radius: 50%;
+  color: #fff;
+  display: grid;
+  flex: 0 0 38px;
+  font-size: 9px;
+  height: 38px;
+  place-items: center;
+  box-shadow: 0 0 0 5px rgba(13, 107, 104, 0.12);
+}
+.voice-command-button.active {
   background: var(--orange);
   color: #fff;
+}
+.voice-command-button.active .voice-command-icon {
+  background: #fff;
+  color: var(--orange);
+  animation: pulse 1s infinite;
+}
+.voice-command-button:disabled {
+  cursor: wait;
+  opacity: 0.75;
 }
 .voice-line {
   display: flex;
@@ -227,6 +270,11 @@ footer {
 }
 .primary-button:hover {
   background: var(--teal);
+}
+.primary-button:disabled {
+  background: #cbd2ce;
+  color: #6f7a77;
+  cursor: not-allowed;
 }
 .button-icon {
   font-size: 22px;

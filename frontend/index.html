@@ -51,26 +51,32 @@
           <section class="panel target-panel">
             <div class="panel-heading">
               <span class="panel-index">01</span>
-              <h2>What are we finding?</h2>
+              <h2>What should I find?</h2>
             </div>
-            <label class="target-input"
-              ><span class="sr-only">Target object</span
-              ><input id="target-input" value="red coffee mug" /><button
-                id="mic-button"
-                class="icon-button"
-                title="Speak target"
-                aria-label="Speak target"
-              >
-                MIC
-              </button></label
+            <input id="target-input" type="hidden" value="" />
+            <div class="voice-target" aria-live="polite">
+              <span>CURRENT TARGET</span>
+              <strong id="target-display">No target selected</strong>
+            </div>
+            <button
+              id="mic-button"
+              class="voice-command-button"
+              type="button"
+              aria-label="Tell Wayfinder what to find"
             >
+              <span class="voice-command-icon" aria-hidden="true">●</span>
+              <span>
+                <strong id="mic-button-label">Tell me what to find</strong>
+                <small>Tap, then speak naturally</small>
+              </span>
+            </button>
             <div class="voice-line">
               <span class="pulse" id="voice-pulse"></span
-              ><span id="voice-label">Tap the mic or type a target</span>
+              ><span id="voice-label">Try “Find my keys” or “Look for my red mug”</span>
             </div>
-            <button class="primary-button" id="start-button">
+            <button class="primary-button" id="start-button" disabled>
               <span class="button-icon">+</span
-              ><span id="start-label">Start finding</span>
+              ><span id="start-label">Speak a target first</span>
             </button>
           </section>
 

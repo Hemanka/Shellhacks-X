@@ -11,9 +11,11 @@ const state = {
   nextScanAt: null,
   remoteSocket: null,
   remoteFrame: null,
+  listening: false,
 };
 const $ = (id) => document.getElementById(id);
 const targetInput = $("target-input");
+const targetDisplay = $("target-display");
 const startButton = $("start-button");
 const cameraButton = $("camera-button");
 const pairButton = $("pair-button");
@@ -21,18 +23,116 @@ const closePairing = $("close-pairing");
 const micButton = $("mic-button");
 const video = $("camera-feed");
 const canvas = document.createElement("canvas");
+let activeAudio = null;
+let activeAudioUrl = null;
+let speechSequence = 0;
+let voiceRecorder = null;
+let voiceRecorderTimeout = null;
 
-function speak(text) {
-  if ("speechSynthesis" in window) {
-    window.speechSynthesis.cancel();
-    window.speechSynthesis.speak(new SpeechSynthesisUtterance(text));
+function stopSpeaking() {
+  speechSequence += 1;
+  window.speechSynthesis?.cancel();
+  if (activeAudio) {
+    activeAudio.pause();
+    activeAudio = null;
+  }
+  if (activeAudioUrl) {
+    URL.revokeObjectURL(activeAudioUrl);
+    activeAudioUrl = null;
   }
 }
-function setInstruction(title, sub, confidence = null) {
+
+function speakWithBrowser(text, sequence) {
+  if (!("speechSynthesis" in window) || sequence !== speechSequence) return;
+  window.speechSynthesis.cancel();
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.rate = 1.05;
+  window.speechSynthesis.speak(utterance);
+}
+
+async function speak(text) {
+  const command = text.trim();
+  if (!command) return;
+
+  stopSpeaking();
+  const sequence = speechSequence;
+
+  try {
+    const response = await fetch("/api/speech", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: command }),
+    });
+    if (!response.ok) throw new Error(`Speech service returned ${response.status}`);
+
+    const audioUrl = URL.createObjectURL(await response.blob());
+    if (sequence !== speechSequence) {
+      URL.revokeObjectURL(audioUrl);
+      return;
+    }
+    const audio = new Audio(audioUrl);
+    activeAudio = audio;
+    activeAudioUrl = audioUrl;
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      URL.revokeObjectURL(audioUrl);
+      if (activeAudio === audio) activeAudio = null;
+      if (activeAudioUrl === audioUrl) activeAudioUrl = null;
+    };
+    audio.addEventListener("ended", release, { once: true });
+    audio.addEventListener("error", release, { once: true });
+    try {
+      await audio.play();
+    } catch (error) {
+      release();
+      throw error;
+    }
+  } catch (error) {
+    console.warn("ElevenLabs speech unavailable; using browser voice.", error);
+    speakWithBrowser(command, sequence);
+  }
+}
+
+function setInstruction(title, sub, confidence = null, announce = true) {
   $("instruction").textContent = title;
   $("instruction-sub").textContent = sub;
   $("confidence-value").textContent =
     confidence === null ? "—" : `${Math.round(confidence * 100)}%`;
+  if (announce && !state.listening) speak(`${title} ${sub}`);
+}
+
+function cleanSpokenTarget(transcript) {
+  let target = transcript.trim().replace(/[.!?]+$/, "");
+  target = target.replace(
+    /^(?:(?:hey(?:\s+there)?|hi|hello|okay|ok|um+|uh+|well|wayfinder)[,\s]+)+/i,
+    "",
+  );
+  const prefixes = [
+    /^(?:please\s+)?(?:(?:can|could|would) you\s+)?(?:help me\s+)?(?:find|locate|look for)\s+(?:me\s+)?/i,
+    /^(?:please\s+)?(?:what\s+)?i\s+want\s+to\s+find\s+is\s+/i,
+    /^(?:please\s+)?i\s+(?:want|need|would like)(?:\s+you)?\s+to\s+(?:help\s+me\s+)?(?:find|locate|look for)\s+(?:me\s+)?/i,
+    /^(?:please\s+)?i(?:'m| am)\s+looking\s+for\s+/i,
+    /^(?:where is|where are)\s+/i,
+  ];
+  for (const prefix of prefixes) target = target.replace(prefix, "");
+  return target
+    .trim()
+    .replace(/^(?:a|an|the|my|some)\s+/i, "")
+    .replace(/\s+please$/i, "")
+    .trim();
+}
+
+function setTarget(target) {
+  targetInput.value = target;
+  targetDisplay.textContent = target || "No target selected";
+  targetDisplay.classList.toggle("empty", !target);
+  startButton.disabled = !target;
+  if (!state.running) {
+    $("start-label").textContent = target ? "Start finding" : "Speak a target first";
+  }
+  $("target-map-label").textContent = target ? target.toUpperCase() : "TARGET";
 }
 function updateClock() {
   if (!state.startedAt) return;
@@ -148,7 +248,6 @@ async function analyzeFrame() {
     );
     $("target-distance").textContent = "1.8m";
     $("target-marker").style.left = `${62 + (state.sightings % 4) * 4}%`;
-    speak(`Target detected. Keep facing this direction.`);
   } else {
     setInstruction(
       "Turn right slowly.",
@@ -206,6 +305,10 @@ async function connectCamera() {
   return true;
 }
 async function startSession() {
+  if (!targetInput.value.trim()) {
+    speak("Tell me what you want to find first.");
+    return;
+  }
   state.running = !state.running;
   if (!state.running) {
     $("session-state").textContent = "Paused";
@@ -214,6 +317,7 @@ async function startSession() {
     clearInterval(state.scanTimer);
     state.nextScanAt = null;
     $("scan-status").textContent = "PAUSED";
+    setInstruction("Session paused.", "Press resume when you are ready to continue.");
     return;
   }
   $("session-state").textContent = "Scanning";
@@ -228,7 +332,6 @@ async function startSession() {
     "Scanning the room.",
     `Looking for your ${targetInput.value}.`,
   );
-  speak(`Scanning for your ${targetInput.value}.`);
   try {
     await connectCamera();
     $("camera-label").textContent = "LIVE CAMERA / ANALYZING";
@@ -261,7 +364,7 @@ async function startSession() {
   }
   clearInterval(state.scanTimer);
   state.scanTimer = setInterval(() => {
-    if (state.running && state.cameraActive) {
+    if (state.running && state.cameraActive && !state.listening) {
       analyzeFrame().catch((error) => {
         if (error.status === 429 || error.message.includes("quota")) {
           state.running = false;
@@ -282,11 +385,13 @@ cameraButton.addEventListener("click", async () => {
   try {
     await connectCamera();
     $("camera-placeholder").querySelector("strong").textContent = "Live camera connected";
+    setInstruction("Camera ready.", "The live camera is connected and ready to scan.");
   } catch (error) {
     $("connection-label").textContent = "CAMERA ACCESS BLOCKED";
     $("camera-label").textContent = "ALLOW CAMERA ACCESS AND TRY AGAIN";
     $("camera-placeholder").querySelector(".placeholder-kicker").textContent = "PERMISSION NEEDED";
     $("camera-placeholder").querySelector("strong").textContent = "Camera access was blocked";
+    setInstruction("Camera access blocked.", "Allow camera access and try again.", 0);
     console.warn("Camera unavailable.", error);
   }
 });
@@ -303,33 +408,108 @@ startButton.addEventListener("click", () =>
     console.warn("Session failed.", error);
   }),
 );
-micButton.addEventListener("click", () => {
-  const SpeechRecognition =
-    window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SpeechRecognition) {
-    $("voice-label").textContent = "Voice input is unavailable in this browser";
+function resetVoiceControls() {
+  state.listening = false;
+  micButton.disabled = false;
+  micButton.classList.remove("active");
+  $("mic-button-label").textContent = "Tell me what to find";
+  $("voice-pulse").classList.remove("listening");
+}
+
+async function useTranscript(transcript) {
+  const recognizedTarget = cleanSpokenTarget(transcript);
+  if (!recognizedTarget) throw new Error("I did not hear a target. Tap the button and try again.");
+
+  setTarget(recognizedTarget);
+  $("voice-label").textContent = `Finding: ${recognizedTarget}`;
+  if (state.running) {
+    setInstruction("Target updated.", `Now looking for your ${recognizedTarget}.`);
+    await analyzeFrame();
+  } else {
+    await startSession();
+  }
+}
+
+async function transcribeVoiceCommand(audioBlob) {
+  micButton.disabled = true;
+  $("mic-button-label").textContent = "Understanding…";
+  $("voice-label").textContent = "Turning your speech into a target";
+  const extension = audioBlob.type.includes("mp4") ? "m4a" : "webm";
+  const form = new FormData();
+  form.append("file", audioBlob, `voice-command.${extension}`);
+
+  const response = await fetch("/api/transcribe", { method: "POST", body: form });
+  if (!response.ok) {
+    let detail = "I could not understand that. Please try again.";
+    try {
+      detail = (await response.json()).detail || detail;
+    } catch {
+      // Keep the accessible generic message for non-JSON server errors.
+    }
+    throw new Error(detail);
+  }
+  const result = await response.json();
+  resetVoiceControls();
+  await useTranscript(result.text);
+}
+
+micButton.addEventListener("click", async () => {
+  if (state.listening) {
+    if (voiceRecorder?.state === "recording") voiceRecorder.stop();
     return;
   }
-  const recognition = new SpeechRecognition();
-  recognition.lang = "en-US";
-  recognition.onstart = () => {
-    micButton.classList.add("active");
-    $("voice-pulse").classList.add("listening");
-    $("voice-label").textContent = "Listening...";
-  };
-  recognition.onresult = (event) => {
-    targetInput.value = event.results[0][0].transcript;
-    $("voice-label").textContent = `Target: ${targetInput.value}`;
-  };
-  recognition.onend = () => {
-    micButton.classList.remove("active");
-    $("voice-pulse").classList.remove("listening");
-  };
-  recognition.start();
+  if (!navigator.mediaDevices?.getUserMedia || !("MediaRecorder" in window)) {
+    const message = "Voice input is unavailable in this browser.";
+    $("voice-label").textContent = message;
+    speak(message);
+    return;
+  }
+
+  stopSpeaking();
+  state.listening = true;
+  micButton.classList.add("active");
+  $("mic-button-label").textContent = "Listening… tap when done";
+  $("voice-pulse").classList.add("listening");
+  $("voice-label").textContent = "Say what you want me to find";
+
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    const preferredTypes = ["audio/webm;codecs=opus", "audio/mp4", "audio/webm"];
+    const mimeType = preferredTypes.find((type) => MediaRecorder.isTypeSupported(type));
+    const chunks = [];
+    voiceRecorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+    voiceRecorder.addEventListener("dataavailable", (event) => {
+      if (event.data.size) chunks.push(event.data);
+    });
+    voiceRecorder.addEventListener("stop", async () => {
+      clearTimeout(voiceRecorderTimeout);
+      stream.getTracks().forEach((track) => track.stop());
+      const audioBlob = new Blob(chunks, { type: voiceRecorder.mimeType || "audio/webm" });
+      voiceRecorder = null;
+      try {
+        await transcribeVoiceCommand(audioBlob);
+      } catch (error) {
+        resetVoiceControls();
+        $("voice-label").textContent = error.message;
+        speak(error.message);
+        console.warn("Voice command failed.", error);
+      }
+    });
+    voiceRecorder.start();
+    voiceRecorderTimeout = setTimeout(() => {
+      if (voiceRecorder?.state === "recording") voiceRecorder.stop();
+    }, 8000);
+  } catch (error) {
+    stream?.getTracks().forEach((track) => track.stop());
+    resetVoiceControls();
+    const message = error.name === "NotAllowedError"
+      ? "Microphone access is blocked. Allow it and try again."
+      : "I cannot access a microphone on this device.";
+    $("voice-label").textContent = message;
+    speak(message);
+    console.warn("Could not record a voice command.", error);
+  }
 });
-targetInput.addEventListener("input", () => {
-  $("voice-label").textContent = targetInput.value
-    ? `Target: ${targetInput.value}`
-    : "Tap the mic or type a target";
-});
+setTarget(targetInput.value);
 renderRegistry();

@@ -9,7 +9,7 @@ python -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 Copy-Item .env.example .env
-# Put your Gemini API key in .env, or set DEMO_MODE=true
+# Put your Gemini and ElevenLabs API keys in .env, or set DEMO_MODE=true for vision
 uvicorn backend.main:app --reload
 ```
 
@@ -26,3 +26,10 @@ The current endpoint asks Gemini for normalized bounding boxes and target matchi
 Click **Use phone camera** on the PC, then scan the QR code with the phone. The phone opens `mobile.html`, captures its camera, and relays JPEG frames to the PC over a WebSocket. The PC continues sending the latest phone frame to Gemini.
 
 Phone camera permissions require a secure context. For a phone on the same Wi-Fi, run the app behind HTTPS and set `PAIR_HOST`, `PAIR_SCHEME=https`, and `PAIR_PORT=443` in `.env`; an HTTPS tunnel such as ngrok is the simplest local setup. The PC and phone must be able to reach the generated URL.
+## ElevenLabs text to speech
+
+Set `ELEVENLABS_API_KEY` in `.env` to have every live guidance instruction spoken with ElevenLabs. The browser calls the local `/api/speech` endpoint, so the secret key remains on the backend. You can optionally set `ELEVENLABS_VOICE_ID` and `ELEVENLABS_MODEL_ID`; the defaults use the George voice and the low-latency `eleven_flash_v2_5` model. If ElevenLabs is unavailable or not configured, Wayfinder automatically falls back to the browser's built-in speech synthesis so guidance remains audible.
+
+## Voice target selection
+
+Target selection is voice-first. Tap **Tell me what to find**, say a natural command such as “help me find my keys,” then tap again when finished. Wayfinder records up to eight seconds, transcribes the command with ElevenLabs Scribe v2, extracts the target, confirms it on screen, and starts scanning automatically. The recording is sent through the backend so the ElevenLabs API key remains private. Microphone permission is required.
