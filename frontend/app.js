@@ -1,3 +1,5 @@
+const SCAN_INTERVAL_MS = 6000;
+
 const state = {
   running: false,
   startedAt: null,
@@ -161,7 +163,7 @@ function renderRegistry() {
   list.innerHTML = state.registry
     .map(
       (item) =>
-        `<div class="registry-item ${item.target ? "target" : ""}"><span>${item.target ? "TARGET" : "OBJ"}</span><b>${item.label}</b><small>${item.score}% CONF.</small></div>`,
+        `<div class="registry-item ${item.target ? "target" : ""}"><span>${item.target ? "TARGET" : "OBSTACLE"}</span><b>${item.label}</b><small>${item.direction ? `${item.direction} · ` : ""}${item.score}% CONF.</small></div>`,
     )
     .join("");
 }
@@ -174,8 +176,19 @@ function renderDetections(candidates) {
     })
     .join("");
 }
+function renderTraversability(result) {
+  if (!result?.overlayDataUrl) return;
+  const overlay = $("traversability-overlay");
+  overlay.src = result.overlayDataUrl;
+  overlay.classList.add("active");
+  const stats = result.percentages || {};
+  $("traversability-readout").textContent =
+    `CANDIDATE ${Math.round(stats.candidate_walkable || 0)}% · ` +
+    `UNKNOWN ${Math.round(stats.unknown || 0)}% · ${Math.round(result.inferenceMs || 0)}MS`;
+}
 function addSightings(result) {
-  state.sightings += result.candidates.length;
+  const obstacles = result.perception?.obstacles || [];
+  state.sightings += result.candidates.length + obstacles.length;
   $("detection-count").textContent =
     `${state.sightings} sighting${state.sightings === 1 ? "" : "s"}`;
   renderDetections(result.candidates);
@@ -193,43 +206,110 @@ function addSightings(result) {
           .includes(targetInput.value.toLowerCase().split(" ").pop()),
       });
   });
+  obstacles.forEach((obstacle) => {
+    const key = `${obstacle.label}:${obstacle.direction}`;
+    const existing = state.registry.find((item) => item.key === key);
+    if (existing) {
+      existing.score = Math.round(obstacle.confidence * 100);
+    } else {
+      state.registry.push({
+        key,
+        label: obstacle.label,
+        direction: obstacle.direction,
+        score: Math.round(obstacle.confidence * 100),
+        target: false,
+      });
+    }
+  });
   renderRegistry();
 }
+
+function applyNavigationDecision(result) {
+  const decision = result.decision;
+  const target = result.perception?.target;
+  if (!decision) return;
+
+  const now = Date.now();
+  const announce =
+    decision.action !== state.lastSpokenAction || now - state.lastSpokenAt >= 6000;
+  setInstruction(
+    decision.voiceInstruction,
+    decision.reason,
+    decision.confidence,
+    announce,
+  );
+  if (announce) {
+    state.lastSpokenAction = decision.action;
+    state.lastSpokenAt = now;
+  }
+
+  $("target-distance").textContent = target?.visible ? target.direction : "—";
+  const targetPositions = { LEFT: "25%", CENTER: "50%", RIGHT: "75%" };
+  if (target?.visible && targetPositions[target.direction]) {
+    $("target-marker").style.left = targetPositions[target.direction];
+  }
+}
+
 async function analyzeFrame() {
+  if (state.analyzing) return;
   if (!state.stream && !state.remoteFrame) {
     $("camera-label").textContent = "NO FRAME TO ANALYZE";
     setInstruction("Camera unavailable.", "Allow camera access before sending a frame to Gemini.", 0);
     return;
   }
-  if (state.remoteFrame) {
-    const remoteImage = new Image();
-    remoteImage.src = state.remoteFrame;
-    await new Promise((resolve) => { remoteImage.onload = resolve; remoteImage.onerror = resolve; });
-    canvas.width = remoteImage.naturalWidth || 640;
-    canvas.height = remoteImage.naturalHeight || 480;
-    canvas.getContext("2d").drawImage(remoteImage, 0, 0);
-  } else {
-    canvas.width = video.videoWidth || 640;
-    canvas.height = video.videoHeight || 480;
-    canvas.getContext("2d").drawImage(video, 0, 0);
-  }
-  setScanStatus("PROCESSING", "PROCESSING FRAME / GEMINI");
-  const image = canvas.toDataURL("image/jpeg", 0.7);
-  const response = await fetch("/api/analyze-frame", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
+  state.analyzing = true;
+  const captureStarted = performance.now();
+  try {
+    if (state.remoteFrame) {
+      const remoteImage = new Image();
+      remoteImage.src = state.remoteFrame;
+      await new Promise((resolve) => { remoteImage.onload = resolve; remoteImage.onerror = resolve; });
+      canvas.width = remoteImage.naturalWidth || 640;
+      canvas.height = remoteImage.naturalHeight || 480;
+      canvas.getContext("2d").drawImage(remoteImage, 0, 0);
+    } else {
+      canvas.width = video.videoWidth || 640;
+      canvas.height = video.videoHeight || 480;
+      canvas.getContext("2d").drawImage(video, 0, 0);
+    }
+    setScanStatus("PROCESSING", "PROCESSING CAMERA-RELATIVE SCENE");
+    const image = canvas.toDataURL("image/jpeg", 0.85);
+    const captureMs = performance.now() - captureStarted;
+    const requestBody = {
       image_base64: image,
       target_object: targetInput.value,
       heading_deg: state.heading,
-    }),
-  });
-  if (!response.ok) {
-    let detail = "Frame analysis failed";
-    try {
-      detail = (await response.json()).detail || detail;
-    } catch {
-      // Keep the generic message when the server returns a non-JSON error.
+      capture_ms: captureMs,
+    };
+    const maskRequest = fetch("/api/traversability-frame", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(requestBody),
+    })
+      .then(async (maskResponse) => {
+        if (!maskResponse.ok) throw new Error(`Mask service returned ${maskResponse.status}`);
+        return maskResponse.json();
+      })
+      .then(renderTraversability)
+      .catch((error) => {
+        $("traversability-readout").textContent = "MASK UNAVAILABLE";
+        console.warn("Traversability overlay unavailable.", error);
+      });
+    const response = await fetch("/api/analyze-frame", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(requestBody),
+    });
+    if (!response.ok) {
+      let detail = "Frame analysis failed";
+      try {
+        detail = (await response.json()).detail || detail;
+      } catch {
+        // Keep the generic message when the server returns a non-JSON error.
+      }
+      const error = new Error(detail);
+      error.status = response.status;
+      throw error;
     }
     const error = new Error(detail);
     error.status = response.status;
@@ -272,6 +352,8 @@ async function pairPhoneCamera() {
     const message = JSON.parse(event.data);
     if (message.type === "frame") {
       state.remoteFrame = message.image_base64;
+      $("remote-camera-frame").src = message.image_base64;
+      $("remote-camera-frame").classList.add("active");
       state.cameraActive = true;
       $("connection-label").textContent = "PHONE CAMERA ACTIVE";
       $("camera-placeholder").classList.add("hidden");
@@ -300,6 +382,7 @@ async function connectCamera() {
     throw new Error("Camera stream has no video frames");
   }
   state.cameraActive = true;
+  $("remote-camera-frame").classList.remove("active");
   $("camera-placeholder").classList.add("hidden");
   $("camera-placeholder").style.display = "none";
   $("connection-label").textContent = "LIVE CAMERA ACTIVE";
@@ -369,7 +452,12 @@ async function startSession() {
   }
   clearInterval(state.scanTimer);
   state.scanTimer = setInterval(() => {
-    if (state.running && state.cameraActive && !state.listening) {
+    if (
+      state.running &&
+      state.cameraActive &&
+      !state.listening &&
+      Date.now() >= state.backoffUntil
+    ) {
       analyzeFrame().catch((error) => {
         if (error.status === 429 || error.message.includes("quota")) {
           $("session-state").textContent = "Scanning";
@@ -386,7 +474,7 @@ async function startSession() {
         console.warn("Frame analysis failed.", error);
       });
     }
-  }, 3000);
+  }, SCAN_INTERVAL_MS);
 }
 cameraButton.addEventListener("click", async () => {
   try {

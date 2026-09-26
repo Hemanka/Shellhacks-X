@@ -31,8 +31,8 @@
           <p class="eyebrow">ASSISTED NAVIGATION / SESSION 014</p>
           <h1>Find your way<br /><em>with confidence.</em></h1>
           <p class="lede">
-            Describe what you need. Wayfinder scans the space, builds a living
-            map, and speaks one clear next step at a time.
+            Describe what you need. Wayfinder reads the camera-relative scene
+            and speaks one clear next step at a time.
           </p>
         </div>
         <div class="session-card">
@@ -112,17 +112,20 @@
             <div class="panel-heading">
               <span class="panel-index">03</span>
               <h2>Camera view</h2>
-              <span class="map-caption">VISION / TARGET ONLY</span>
+              <span class="map-caption">VISION / THREE SECTORS</span>
             </div>
             <div class="camera-stage" id="camera-stage">
               <video id="camera-feed" autoplay muted playsinline></video>
+              <img id="remote-camera-frame" class="remote-camera-frame" alt="Live phone camera frame" />
               <div class="camera-placeholder" id="camera-placeholder">
                 <span class="placeholder-kicker">CAMERA PREVIEW</span
                 ><strong>Press start to scan the room</strong
                 ><span>Detected objects will be outlined here.</span>
                 <div class="camera-actions"><button class="camera-button" id="camera-button" type="button">Enable camera</button><button class="camera-button secondary" id="pair-button" type="button">Use phone camera</button></div>
               </div>
+              <img id="traversability-overlay" class="traversability-overlay" alt="" aria-hidden="true" />
               <div class="detection-layer" id="detection-layer"></div>
+              <div class="traversability-readout" id="traversability-readout">MASK WAITING</div>
               <div class="camera-readout">
                 <span id="frame-label">NO FRAME</span
                 ><span id="camera-label">AWAITING CAMERA</span>
@@ -133,8 +136,8 @@
           <section class="panel map-panel">
             <div class="panel-heading">
                 <span class="panel-index">04</span>
-              <h2>Spatial map</h2>
-              <span class="map-caption">OBJECT REGISTRY / BEV</span>
+              <h2>Camera-relative view</h2>
+              <span class="map-caption">LEFT / CENTER / RIGHT</span>
             </div>
             <div class="map-stage" id="map-stage">
               <div class="map-grid-lines"></div>

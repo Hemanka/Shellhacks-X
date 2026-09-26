@@ -33,3 +33,36 @@ Set `ELEVENLABS_API_KEY` in `.env` to have every live guidance instruction spoke
 ## Voice target selection
 
 Target selection is voice-first. Tap **Tell me what to find**, say a natural command such as “help me find my keys,” then tap again when finished. Wayfinder records up to eight seconds, transcribes the command with ElevenLabs Scribe v2, extracts the target, confirms it on screen, and starts scanning automatically. The recording is sent through the backend so the ElevenLabs API key remains private. Microphone permission is required.
+
+## Phase 1 candidate traversability mask
+
+Generate a human-reviewable semantic-segmentation visualization from an indoor
+photograph:
+
+```bash
+.venv/bin/python -m backend.traversability.debug test.jpg
+```
+
+The first run downloads the pretrained SegFormer-B0 ADE20K checkpoint. The
+command writes `walkable-debug.png` in the current directory and prints the
+candidate-walkable, blocked, unknown, and non-walkable pixel percentages plus
+inference time. Green means candidate walkable—not guaranteed safe.
+
+Optional detector output can override the segmentation using normalized
+bounding boxes and configurable planning padding:
+
+```bash
+.venv/bin/python -m backend.traversability.debug test.jpg \
+  --obstacles detections.json --obstacle-padding 0.10
+```
+
+```json
+{
+  "obstacles": [
+    {"label": "chair", "bbox": [0.3, 0.35, 0.6, 0.9], "confidence": 0.92}
+  ]
+}
+```
+
+This Phase 1 tool is deliberately isolated from the navigation engine, A*, and
+spoken guidance until real-room masks have been reviewed.
