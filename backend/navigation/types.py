@@ -84,6 +84,7 @@ class PerceptionState:
     sectors: SectorObservations
     obstacles: tuple[ObstacleObservation, ...] = ()
     scene_confidence: float = 0
+    details: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         _check_confidence("scene confidence", self.scene_confidence)

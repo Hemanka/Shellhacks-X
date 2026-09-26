@@ -1,6 +1,6 @@
 const debug = {
   events: [], frameTimes: [], resultTimes: [], lastResult: null, lastMask: null,
-  lastFrameAt: 0, pairing: false,
+  lastFrameAt: 0, pairing: false, cameraInterrupted: false,
 };
 const debugElement = id => document.getElementById(id);
 function debugText(id, value) { const element = debugElement(id); if (element) element.textContent = value; }
@@ -25,6 +25,20 @@ function tickRate(samples, now) {
 }
 window.WayfinderDashboard = {
   event: debugEvent,
+  controller(snapshot) {
+    debug.controller=snapshot;
+    if ('selectedRoute' in snapshot) {
+      const overlay=debugElement('route-overlay');
+      if(overlay) {
+        const w=snapshot.routeWidth || 640,h=snapshot.routeHeight || 480;
+        const points=(snapshot.selectedRoute?.points || []).map(([x,y])=>`${x*w},${y*h}`).join(' ');
+        overlay.src='data:image/svg+xml,'+encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}"><polyline points="${points}" fill="none" stroke="#fff176" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/></svg>`);
+      }
+    }
+    debugText('controller-summary',`${snapshot.stage} · ${snapshot.reason}`);
+    debugText('controller-state',JSON.stringify(snapshot,null,2));
+    if(debug.lastStage!==snapshot.stage) {debug.lastStage=snapshot.stage;debugEvent('stage transition',{stage:snapshot.stage,reason:snapshot.reason});}
+  },
   instruction(title, context) { debugText('instruction', title); debugText('instruction-sub', context); },
   result(result) {
     debug.lastResult = result;
@@ -57,8 +71,10 @@ window.WayfinderDashboard = {
   },
 };
 
-function publishSession() { sendToPhone({ type: 'session_state', running: state.running, target: targetInput.value }); }
+function publishSession() { sendToPhone({ type: 'session_state', running: state.running, target: targetInput.value, revision:navigation?.revision ?? 0 }); }
 function phoneDisconnected() {
+  navigation?.invalidate("Phone disconnected");
+  state.frameMeta=null; state.phoneClock=null; state.orientation=null;
   state.revision += 1; state.remoteFrame = null; state.cameraActive = false;
   state.listening = false; debugText('phone-state', 'Disconnected');
   debugText('camera-permission', 'Disconnected'); debugText('mic-permission', 'Disconnected');
@@ -93,20 +109,37 @@ async function pairPhoneCamera() {
       try {
         const message = JSON.parse(event.data);
         if (message.type === 'frame') {
+          if(message.meta) {
+            if(state.frameMeta && state.frameMeta.stream!==message.meta.stream) navigation?.invalidate('Camera stream changed');
+            state.frameMeta=message.meta;
+            state.phoneClock={at:message.meta.capturedAt,received:performance.now()};
+            state.orientation=message.meta.orientation;
+          }
           const now = Date.now(); state.remoteFrame = message.image_base64;
           state.remoteFrameId++; state.remoteFrameAt = now; debug.lastFrameAt = now;
           state.cameraActive = true;
+          if (debug.cameraInterrupted) {
+            debug.cameraInterrupted = false;
+            state.revision++; state.nextScanAt = 0;
+            navigation?.invalidate('Camera recovered; checking a new frame');
+            debugEvent('camera recovered');
+          }
           debugElement('remote-camera-frame').src = message.image_base64;
           debugElement('remote-camera-frame').classList.add('active');
           debugElement('camera-placeholder').classList.add('hidden');
           debugText('camera-rate', tickRate(debug.frameTimes, now));
           debugText('connection-label', 'PHONE CAMERA LIVE');
+        } else if (message.type === 'orientation') {
+          if(state.frameMeta?.stream===message.stream) {
+            state.orientation=message.orientation;
+            if(!state.phoneClock || message.orientation.at>state.phoneClock.at) state.phoneClock={at:message.orientation.at,received:performance.now()};
+          }
         } else if (message.type === 'peer_status') {
           if (message.connected) { debugText('phone-state', 'Connected'); publishSession(); }
           else phoneDisconnected();
           debugEvent('phone connection', { connected: message.connected });
         } else if (message.type === 'transcript') {
-          await useTranscript(message.text); publishSession();
+          await useTranscript(message.text); if(navigation?.stage!=='COMPLETE') publishSession();
         } else if (message.type === 'listening') {
           state.listening = message.active; state.revision++;
           debugText('mic-permission', message.active ? 'Recording / transcribing' : 'Allowed');
@@ -115,6 +148,7 @@ async function pairPhoneCamera() {
           if (message.camera) debugText('camera-permission', message.camera);
           if (message.microphone) debugText('mic-permission', message.microphone);
             if (message.speech) debugText('speech-state', message.speech);
+            if (message.haptics || message.orientation) debugText('feedback-state',message.haptics || message.orientation);
             if (message.speech === 'fallback' || message.speech === 'blocked') debugEvent('speech error', { detail: message.detail });
           debugEvent('phone status', message);
         } else if (message.type === 'control') {
@@ -132,7 +166,7 @@ debugElement('target-form').addEventListener('submit', event => {
 });
 debugElement('clear-events').addEventListener('click', () => { debug.events = []; debugElement('event-log').replaceChildren(); });
 debugElement('export-debug').addEventListener('click', () => {
-  const blob = new Blob([JSON.stringify({ exportedAt: new Date().toISOString(), result: debug.lastResult, mask: debug.lastMask, events: debug.events }, null, 2)], { type: 'application/json' });
+  const blob = new Blob([JSON.stringify({ exportedAt: new Date().toISOString(), result: debug.lastResult, mask: debug.lastMask, events: debug.events, controller:debug.controller, observations:navigation?.history }, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob); const link = document.createElement('a');
   link.href = url; link.download = 'wayfinder-debug.json'; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
@@ -148,12 +182,13 @@ async function checkServices() {
 setInterval(() => {
   window.WayfinderDashboard.loop(state);
   debugText('frame-age', debug.lastFrameAt ? `${((Date.now() - debug.lastFrameAt) / 1000).toFixed(1)} s` : '—');
-  if (debug.lastFrameAt && Date.now() - debug.lastFrameAt > 2000) {
+  if (debug.lastFrameAt && Date.now() - debug.lastFrameAt > 10000) {
     debugText('camera-rate', '0');
-    if (state.running) {
-      startSession();
-      setInstruction('Stop. Camera frames stopped.', 'Check the phone camera, then resume.');
-      debugEvent('camera error', { message: 'No new phone frame for two seconds; guidance paused.' });
+    if (state.running && !debug.cameraInterrupted) {
+      debug.cameraInterrupted = true; state.revision++;
+      navigation?.invalidate('Camera delivery interrupted'); stopSpeaking();
+      setInstruction('Stay in place. Waiting for the camera to reconnect.', 'Keep this page open; guidance will continue when the camera returns.');
+      debugEvent('camera error', { message: 'No phone frame for ten seconds; waiting for automatic recovery.' });
     }
   }
   if (debug.resultTimes.length && Date.now() - debug.resultTimes.at(-1) > 5000) debugText('analysis-rate', '0');

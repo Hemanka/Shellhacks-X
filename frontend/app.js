@@ -46,6 +46,21 @@ async function speak(text) {
   window.WayfinderDashboard?.event('speech output', { text: command, sent });
 }
 
+function phoneNow() {
+  return state.phoneClock ? state.phoneClock.at + performance.now()-state.phoneClock.received : 0;
+}
+const navigation = window.NavigationController ? new window.NavigationController(cue => {
+  if (!state.running || state.listening) return;
+  if(cue.type==='cancel_hazard') { sendToPhone(cue); return; }
+  setInstruction(cue.text, `${cue.stage} · ${cue.source}`, null, false);
+  sendToPhone({...cue,stream:state.frameMeta?.stream});
+  window.WayfinderDashboard?.event('speech output',cue);
+}, snapshot=>window.WayfinderDashboard?.controller?.(snapshot), {routeMode:true}) : null;
+setInterval(()=>{
+  if (!navigation || !state.running || state.listening) return;
+  if (['SEARCH','RECOVER'].includes(navigation.stage)) navigation.tick(phoneNow(),state.orientation);
+},100);
+
 function setInstruction(title, sub, confidence = null, announce = true, spokenText = null) {
   $("instruction").textContent = title;
   $("instruction-sub").textContent = sub;
@@ -78,6 +93,7 @@ function cleanSpokenTarget(transcript) {
 
 function setTarget(target) {
   state.revision += 1;
+  navigation?.reset(target); stopSpeaking();
   state.nextScanAt = 0;
   state.lastSpokenKey = null;
   targetInput.value = target;
@@ -180,6 +196,12 @@ function addSightings(result) {
 }
 
 function applyNavigationDecision(result) {
+  if (navigation) {
+    const target = result.perception?.target;
+    $("target-distance").textContent = target?.visible ? target.direction : "—";
+    navigation.observe(result, result.frame_meta, phoneNow(), state.orientation);
+    return;
+  }
   const decision = result.decision;
   const target = result.perception?.target;
   if (!decision) return;
@@ -222,7 +244,7 @@ function updateTraversability(requestBody, isCurrent) {
       if (!response.ok) throw new Error(`Mask service returned ${response.status}`);
       return response.json();
     })
-    .then((result) => { if (isCurrent()) { renderTraversability(result); window.WayfinderDashboard?.mask(result); } })
+    .then((result) => { if (isCurrent()) { renderTraversability(result); window.WayfinderDashboard?.mask(result); if (state.running && !state.listening) navigation?.observeRoute(result, result.frame_meta, phoneNow(), state.orientation); } })
     .catch((error) => {
       state.nextMaskAt = Date.now() + 10000;
       if (isCurrent()) $("traversability-readout").textContent = "MASK UNAVAILABLE";
@@ -244,6 +266,7 @@ function tickTraversability() {
   updateTraversability({
     image_base64: state.remoteFrame,
     target_object: targetInput.value,
+    frame_meta: state.frameMeta,
     heading_deg: state.heading,
     capture_ms: 0,
   }, () => state.running && state.cameraActive && state.revision === revision);
@@ -268,6 +291,7 @@ async function analyzeFrame() {
   state.nextScanAt = Date.now() + SCAN_INTERVAL_MS;
   const captureStarted = performance.now();
   try {
+    const frameMeta = state.frameMeta ? JSON.parse(JSON.stringify(state.frameMeta)) : null;
     if (state.remoteFrame) {
       const remoteImage = new Image();
       state.analyzedRemoteFrameId = state.remoteFrameId;
@@ -293,6 +317,7 @@ async function analyzeFrame() {
       target_object: target,
       heading_deg: state.heading,
       capture_ms: captureMs,
+      frame_meta: frameMeta,
     };
     if (state.remoteFrame) tickTraversability();
     else updateTraversability(requestBody, isCurrent);
@@ -367,8 +392,9 @@ async function startSession() {
   state.revision += 1;
   state.nextScanAt = 0;
   state.lastSpokenKey = null;
-  sendToPhone({ type: "session_state", running: state.running, target: targetInput.value });
+  sendToPhone({ type: "session_state", running: state.running, target: targetInput.value, revision: navigation?.revision ?? 0 });
   if (!state.running) {
+    navigation?.invalidate("Session paused"); stopSpeaking();
     $("session-state").textContent = "Paused";
     $("start-label").textContent = "Resume finding";
     clearInterval(state.timer);
@@ -445,13 +471,26 @@ async function startSession() {
   }, SCAN_POLL_MS);
 }
 async function useTranscript(transcript) {
+  state.listening = false;
+  const command = navigation?.command(transcript, phoneNow());
+  if(command) {
+    window.WayfinderDashboard?.event('speech input',{transcript,command});
+    if(command==='pause' && state.running) await startSession();
+    if(command==='complete') {
+      state.running=false; state.revision++; clearInterval(state.scanTimer);
+      $("session-state").textContent='Complete'; $("start-label").textContent='Start finding';
+      // Stop analysis immediately; allow the short completion acknowledgment to play.
+      setTimeout(()=>{if(!state.running) sendToPhone({type:'session_state',running:false,target:targetInput.value,revision:navigation.revision});},4000);
+    }
+    return;
+  }
   const target = cleanSpokenTarget(transcript).slice(0, 100);
   if (!target) throw new Error('No target was recognized.');
   state.listening = false;
   setTarget(target);
   window.WayfinderDashboard?.event('speech input', { transcript, target });
   if (state.running) {
-    sendToPhone({ type: 'session_state', running: true, target });
+    sendToPhone({ type: 'session_state', running: true, target, revision:navigation?.revision ?? 0 });
     setInstruction('Target updated.', 'Looking for ' + target + '.');
     await analyzeFrame();
   } else if (state.cameraActive) {

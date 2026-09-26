@@ -5,7 +5,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '../frontend/mobile.js'), 'utf8');
 
-function phoneHarness() {
+function phoneHarness(modern = false) {
   const elements = new Map(), sent = [], spoken = [], timers = [], requests = [];
   let socket, recorder, permissions = 0;
   const tracks = [{ readyState: 'live', stop() {} }, { readyState: 'live', stop() {} }];
@@ -35,11 +35,12 @@ function phoneHarness() {
       start() { this.state = 'recording'; }
       stop() { this.state = 'inactive'; this.ondataavailable({ data: new Blob(['audio']) }); return this.onstop(); }
     },
-    Blob, FormData,
+    Blob, FormData, performance,
     fetch: async (url, options) => { requests.push({ url, options }); return { ok: true, json: async () => ({ text: 'Find my keys' }) }; },
     setInterval(fn, ms) { timers.push({ fn, ms }); return timers.length; }, clearInterval() {},
     setTimeout() {}, clearTimeout() {},
   });
+  if(modern) vm.runInContext(fs.readFileSync(path.join(__dirname,'../frontend/feedback.js'),'utf8'),context);
   vm.runInContext(source + '\nglobalThis.phoneState = phone;', context);
   return {
     elements, sent, spoken, timers, requests, state: context.phoneState,
@@ -105,4 +106,18 @@ test('phone pause control requests a dashboard pause', () => {
   const h = phoneHarness(); h.state.running = true;
   h.click('pause-guidance');
   assert.ok(h.sent.some(event => event.type === 'control' && event.action === 'pause'));
+});
+
+
+test('a modern hazard cancels recording and its transcript, then speaks the named warning',async()=>{
+  const h=phoneHarness(true);h.message({type:'peer_status',connected:true});await h.click('allow-permissions');
+  h.message({type:'session_state',running:true,revision:2,target:'bottle'});
+  await h.click('record-command');
+  h.message({type:'hazard',id:'2:1',revision:2,stream:h.state.streamId,expiresAt:performance.now()+3000,
+    priority:0,key:'chair',stage:'HOLD',text:'Stop—chair directly ahead.'});
+  await Promise.resolve();
+  assert.equal(h.state.listening,false);
+  assert.ok(h.spoken.includes('Stop—chair directly ahead.'));
+  assert.equal(h.requests.filter(x=>x.url==='/api/transcribe').length,0);
+  assert.ok(h.sent.some(x=>x.type==='phone_status' && x.haptics==='tone fallback'));
 });

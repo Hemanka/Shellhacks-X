@@ -13,10 +13,11 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, File, UploadFile
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageStat, UnidentifiedImageError
 from pydantic import BaseModel, Field
 
 from .pairing import router as pairing_router
+from .telemetry import FrameMeta
 from .navigation.navigator import CameraRelativeNavigator
 from .navigation.guidance import guidance_for_step
 from .navigation.types import NavigationAction, NavigationDecision, PerceptionState
@@ -27,6 +28,7 @@ from .perception import (
     perception_to_dict,
     uncertain_perception,
 )
+from .traversability.route import plan_routes
 from .traversability.debug import overlay_data_url
 from .traversability.segmenter import SegformerTraversabilitySegmenter
 
@@ -42,11 +44,9 @@ ELEVENLABS_URL = "https://api.elevenlabs.io/v1/text-to-speech"
 ELEVENLABS_STT_URL = "https://api.elevenlabs.io/v1/speech-to-text"
 DEFAULT_ELEVENLABS_VOICE_ID = "JBFqnCBsd6RMkjVDRZzb"
 MAX_VOICE_COMMAND_BYTES = 10 * 1024 * 1024
-navigation_engine = CameraRelativeNavigator(
-    debug=os.getenv("NAVIGATION_DEBUG", "false").lower() == "true"
-)
-navigation_target: str | None = None
 traversability_segmenter = SegformerTraversabilitySegmenter()
+# Per-model quota cooldown; navigation state remains session-local.
+gemini_model_cooldowns: dict[str, float] = {}
 
 VOICE_INSTRUCTIONS = {
     NavigationAction.FORWARD: "Move forward one small step.",
@@ -63,6 +63,7 @@ class FrameRequest(BaseModel):
     target_object: str = Field(default="object", min_length=1, max_length=100)
     heading_deg: float = Field(default=0, ge=-360, le=360)
     capture_ms: float = Field(default=0, ge=0, le=60_000)
+    frame_meta: FrameMeta | None = None
 
 
 class SpeechRequest(BaseModel):
@@ -132,13 +133,20 @@ def navigation_result(
     model: str | None = None,
     rate_limited: bool = False,
     retry_after_ms: int = 0,
+    attempts: list[dict] | None = None,
 ) -> dict[str, Any]:
     target = perception.target
     guidance = guidance_for_step(decision, perception)
+    box = perception.details.get("target", {}).get("bbox")
+    candidates = []
+    if target and target.visible and box:
+        left, top, right, bottom = box
+        candidates.append({"label": target.label, "score": target.confidence, "bbox": [left, top, right-left, bottom-top]})
     result = {
         "frame_id": str(uuid.uuid4())[:8],
+        "frame_meta": payload.frame_meta.model_dump() if payload.frame_meta else None,
         "heading_deg": payload.heading_deg,
-        "candidates": [],
+        "candidates": candidates,
         "target_match": {
             "found": bool(target and target.visible),
             "match_confidence": target.confidence if target else 0,
@@ -149,6 +157,7 @@ def navigation_result(
         "next_action": decision.action.value,
         "source": source,
         "model": model,
+        "geminiAttempts": attempts or [],
         "rateLimited": rate_limited,
         "retryAfterMs": retry_after_ms,
         "timings": {
@@ -209,6 +218,7 @@ def traversability_result(image_bytes: bytes) -> dict[str, Any]:
     )
     return {
         "overlayDataUrl": overlay_data_url(mask),
+        "pathPlan": plan_routes(mask),
         "percentages": stats,
         "inferenceMs": round(mask.inference_ms, 2),
         "totalMs": round(total_ms, 2),
@@ -335,12 +345,8 @@ def transcribe_voice_command(file: UploadFile = File(...)) -> dict[str, str]:
 
 @app.post("/api/analyze-frame")
 def analyze_frame(payload: FrameRequest) -> dict[str, Any]:
-    global navigation_target
-
+    navigation_engine = CameraRelativeNavigator()
     started = perf_counter()
-    if navigation_target != payload.target_object:
-        navigation_engine.reset()
-        navigation_target = payload.target_object
 
     api_key = gemini_key()
     if os.getenv("DEMO_MODE", "false").lower() == "true" or not api_key:
@@ -357,6 +363,17 @@ def analyze_frame(payload: FrameRequest) -> dict[str, Any]:
         )
 
     image_bytes = decode_image(payload.image_base64)
+    try:
+        with Image.open(BytesIO(image_bytes)) as source_image:
+            thumbnail = source_image.convert("L").resize((64, 64))
+            blank = ImageStat.Stat(thumbnail).stddev[0] < 3
+    except (UnidentifiedImageError, OSError, ValueError):
+        raise HTTPException(status_code=422, detail="Camera frame is not a readable image")
+    if blank:
+        perception = uncertain_perception(payload.target_object)
+        return navigation_result(payload, perception, navigation_engine.decide(perception),
+                                 source="insufficient_image", started=started,
+                                 error="Camera view has too little visual detail; show the room and target.")
     body = {
         "contents": [{"parts": [
             {"text": GEMINI_PERCEPTION_PROMPT.format(target=payload.target_object)},
@@ -377,17 +394,31 @@ def analyze_frame(payload: FrameRequest) -> dict[str, Any]:
     model_used = None
     rate_limited = False
     retry_after_ms = 0
+    attempts = []
     try:
-        models = gemini_models()
+        configured_models = gemini_models()
+        models = tuple(model for model in configured_models if gemini_model_cooldowns.get(model, 0) <= perf_counter())
+        if not models:
+            retry_after_ms = max(1000, int((min(gemini_model_cooldowns[m] for m in configured_models)-perf_counter())*1000))
+            perception = uncertain_perception(payload.target_object)
+            return navigation_result(payload, perception, navigation_engine.decide(perception), source="rate_limit",
+                                     started=started, rate_limited=True, retry_after_ms=retry_after_ms,
+                                     error="Gemini models are cooling down after quota limits")
         response = None
         for index, model in enumerate(models):
             model_used = model
+            attempt_started = perf_counter()
             response = requests.post(
                 GEMINI_URL_TEMPLATE.format(model=model),
                 params={"key": api_key},
                 json=body,
                 timeout=12,
             )
+            attempts.append({"model": model, "status": response.status_code, "durationMs": round((perf_counter()-attempt_started)*1000, 1)})
+            if response.status_code == 429:
+                gemini_model_cooldowns[model] = perf_counter() + max(30_000, gemini_retry_after_ms(response))/1000
+            else:
+                gemini_model_cooldowns.pop(model, None)
             if response.status_code != 429 or index == len(models) - 1:
                 break
             print(f"Gemini model {model} was rate limited; trying {models[index + 1]}.")
@@ -444,13 +475,16 @@ def analyze_frame(payload: FrameRequest) -> dict[str, Any]:
         model=model_used,
         rate_limited=rate_limited,
         retry_after_ms=retry_after_ms,
+        attempts=attempts,
     )
 
 
 @app.post("/api/traversability-frame")
 def analyze_traversability_frame(payload: FrameRequest) -> dict[str, Any]:
     """Return the local Phase 1 mask independently from cloud navigation."""
-    return traversability_result(decode_image(payload.image_base64))
+    result = traversability_result(decode_image(payload.image_base64))
+    result["frame_meta"] = payload.frame_meta.model_dump() if payload.frame_meta else None
+    return result
 
 
 app.mount("/", StaticFiles(directory=ROOT / "frontend", html=True), name="frontend")

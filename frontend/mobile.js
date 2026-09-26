@@ -13,6 +13,18 @@ const speech = new WayfinderSpeech((state, detail) => {
   sendPhone({ type: 'phone_status', speech: state, detail });
   if (state === 'blocked') el('status').textContent = 'Tap Hear again to hear the instruction.';
 });
+phone.streamId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+phone.frameSeq = 0; phone.revision = 0;
+const orientation = window.PhoneOrientation ? new window.PhoneOrientation(detail => sendPhone({type:'phone_status',orientation:detail})) : null;
+const feedback = window.PhoneFeedback ? new window.PhoneFeedback(speech,
+  (kind,detail)=>sendPhone({type:'phone_status',...(kind==='haptics'?{haptics:detail}:{}),detail}),
+  cue=>{phone.lastGuidance=cue.text;el('spoken-output').textContent=cue.text;el('repeat-guidance').disabled=false;},
+  ()=>{phone.commandRevision++; if(phone.recorder?.state==='recording') phone.recorder.stop(); phone.listening=false; sendPhone({type:'listening',active:false});}
+) : null;
+setInterval(()=>{
+  const sample=orientation?.current();
+  if(sample && phone.dashboard && phone.socket?.bufferedAmount===0) sendPhone({type:'orientation',stream:phone.streamId,orientation:sample});
+},100);
 function showStatus(text) { el('status').textContent = text; }
 function reportPermissions() {
   sendPhone({ type: 'phone_status',
@@ -28,7 +40,7 @@ function setPhoneReady() {
   if (ready) showStatus('Ready. Tap to tell me what to find.');
 }
 function stopPhoneInput() {
-  phone.commandRevision++;
+  phone.commandRevision++; feedback?.cancel();
   clearInterval(phone.frameTimer); clearTimeout(phone.recordTimer);
   if (phone.recorder?.state === 'recording') phone.recorder.stop();
   phone.listening = false; speech.stop();
@@ -52,13 +64,19 @@ function connectPhone() {
         clearInterval(phone.frameTimer); phone.frameTimer = setInterval(sendFrame, 200);
       }
       setPhoneReady(); reportPermissions();
+    } else if ((message.type === 'hazard' || (message.type === 'guidance' && !phone.listening)) && message.id && feedback) {
+      feedback.accept(message);
+    } else if (message.type === 'cancel_hazard') {
+      try { navigator.vibrate?.(0); } catch {}
     } else if (message.type === 'guidance' && !phone.listening) {
       phone.lastGuidance = message.text; el('spoken-output').textContent = message.text;
       el('repeat-guidance').disabled = false; speech.speak(message.text);
     } else if (message.type === 'stop_speech') {
-      speech.stop();
+      feedback?.cancel(); speech.stop();
     } else if (message.type === 'session_state') {
       phone.running = message.running;
+      phone.revision = message.revision ?? phone.revision;
+      feedback?.session(phone.revision,phone.streamId,phone.running);
       el('pause-guidance').textContent = phone.running ? 'Pause guidance' : 'Resume guidance';
     }
   };
@@ -75,9 +93,12 @@ function connectPhone() {
 function sendFrame() {
   const socket = phone.socket;
   if (!phone.dashboard || !socket || socket.readyState !== WebSocket.OPEN || socket.bufferedAmount > 0 || !phoneVideo.videoWidth) return;
-  captureCanvas.width = phoneVideo.videoWidth; captureCanvas.height = phoneVideo.videoHeight;
-  captureCanvas.getContext('2d').drawImage(phoneVideo, 0, 0);
-  socket.send(JSON.stringify({ type: 'frame', image_base64: captureCanvas.toDataURL('image/jpeg', .65) }));
+  const scale = Math.min(1, 960 / Math.max(phoneVideo.videoWidth, phoneVideo.videoHeight));
+  captureCanvas.width = Math.round(phoneVideo.videoWidth * scale);
+  captureCanvas.height = Math.round(phoneVideo.videoHeight * scale);
+  captureCanvas.getContext('2d').drawImage(phoneVideo, 0, 0, captureCanvas.width, captureCanvas.height);
+  socket.send(JSON.stringify({ type: 'frame', image_base64: captureCanvas.toDataURL('image/jpeg', .65),
+    meta:{stream:phone.streamId,seq:++phone.frameSeq,capturedAt:performance.now(),orientation:orientation?.current() || null} }));
 }
 el('allow-permissions').addEventListener('click', async () => {
   if (phone.connecting) return;
@@ -85,7 +106,7 @@ el('allow-permissions').addEventListener('click', async () => {
   if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
     showStatus('Open the secure phone link from the computer QR code to allow camera and microphone access.'); return;
   }
-  speech.unlock(); phone.connecting = true;
+  speech.unlock(); feedback?.unlock(); orientation?.enable(); phone.connecting = true;
   try {
     if (!phone.stream || phone.stream.getTracks().some(track => track.readyState !== 'live')) {
       phone.stream?.getTracks().forEach(track => track.stop());
@@ -112,7 +133,7 @@ el('record-command').addEventListener('click', () => {
   if (phone.recorder?.state === 'recording') { phone.recorder.stop(); return; }
   if (!phone.stream || !phone.dashboard) return;
   if (!window.MediaRecorder) { showStatus('Voice recording is unavailable in this browser.'); return; }
-  speech.stop(); phone.listening = true; sendPhone({ type: 'listening', active: true });
+  feedback?.cancel(); speech.stop(); phone.listening = true; sendPhone({ type: 'listening', active: true });
   el('record-command').classList.add('recording'); el('record-command').textContent = 'Tap to finish';
   showStatus('Listening. Tell me what you want to find.');
   const chunks = [];
@@ -157,7 +178,7 @@ el('record-command').addEventListener('click', () => {
     sendPhone({ type: 'phone_status', detail: error.message });
   }
 });
-el('repeat-guidance').addEventListener('click', () => { speech.unlock(); if (phone.lastGuidance) speech.speak(phone.lastGuidance); });
+el('repeat-guidance').addEventListener('click', () => { speech.unlock(); if (feedback) feedback.repeat(); else if (phone.lastGuidance) speech.speak(phone.lastGuidance); });
 el('pause-guidance').addEventListener('click', () => {
   phone.commandRevision++;
   if (phone.recorder?.state === 'recording') phone.recorder.stop();

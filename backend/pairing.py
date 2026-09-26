@@ -11,7 +11,8 @@ from urllib.parse import urlsplit
 
 import qrcode
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
+from .telemetry import FrameMeta, Orientation, CueMeta
 
 router = APIRouter()
 
@@ -75,7 +76,22 @@ def relay_message(role: str, message: object) -> dict | None:
         if kind == "frame":
             image = message.get("image_base64")
             if isinstance(image, str) and image.startswith("data:image/jpeg;base64,") and len(image) <= 4_000_000:
-                return {"type": kind, "image_base64": image}
+                result = {"type": kind, "image_base64": image}
+                if "meta" in message:
+                    try:
+                        result["meta"] = FrameMeta.model_validate(message["meta"]).model_dump()
+                    except ValidationError:
+                        return None
+                return result
+        if kind == "orientation":
+            try:
+                orientation = Orientation.model_validate(message.get("orientation"))
+                stream = message.get("stream")
+                if not isinstance(stream, str) or not 0 < len(stream) <= 100:
+                    return None
+                return {"type": kind, "stream": stream, "orientation": orientation.model_dump()}
+            except ValidationError:
+                return None
         if kind == "transcript":
             text = message.get("text")
             if isinstance(text, str) and 0 < len(text.strip()) <= 500:
@@ -85,7 +101,7 @@ def relay_message(role: str, message: object) -> dict | None:
         if kind == "listening" and isinstance(message.get("active"), bool):
             return {"type": kind, "active": message["active"]}
         if kind == "phone_status":
-            allowed = ("camera", "microphone", "speech", "detail")
+            allowed = ("camera", "microphone", "speech", "detail", "orientation", "haptics")
             result = {"type": kind}
             for key in allowed:
                 value = message.get(key)
@@ -93,14 +109,24 @@ def relay_message(role: str, message: object) -> dict | None:
                     result[key] = value[:300]
             return result
     elif role == "pc":
-        if kind == "guidance":
+        if kind in ("guidance", "hazard"):
             text = message.get("text")
             if isinstance(text, str) and 0 < len(text.strip()) <= 500:
-                return {"type": kind, "text": text.strip()}
-        if kind == "stop_speech":
+                result = {"type": kind, "text": text.strip()}
+                if "id" in message or kind == "hazard":
+                    try:
+                        result.update(CueMeta.model_validate(message).model_dump())
+                    except ValidationError:
+                        return None
+                return result
+        if kind in ("stop_speech", "cancel_hazard"):
             return {"type": kind}
         if kind == "session_state" and isinstance(message.get("running"), bool):
-            return {"type": kind, "running": message["running"], "target": str(message.get("target", ""))[:100]}
+            result = {"type": kind, "running": message["running"], "target": str(message.get("target", ""))[:100]}
+            revision = message.get("revision")
+            if isinstance(revision, int) and not isinstance(revision, bool) and revision >= 0:
+                result["revision"] = revision
+            return result
     return None
 
 

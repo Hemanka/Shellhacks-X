@@ -224,13 +224,13 @@ test('local mask keeps updating while Gemini is pending or cooling down', async 
   h.masks()[0].resolve(response()); await new Promise(resolve => setImmediate(resolve));
   h.advance(500);
   Object.assign(h.state, { remoteFrame: 'data:frame2', remoteFrameId: 2, remoteFrameAt: 10500, backoffUntil: 99999 });
-  h.intervals[0].fn();
+  h.intervals.find(timer => timer.ms === 50).fn();
   assert.equal(h.masks().length, 2);
   assert.equal(JSON.parse(h.masks()[1].options.body).image_base64, 'data:frame2');
-  h.intervals[0].fn(); assert.equal(h.masks().length, 2);
+  h.intervals.find(timer => timer.ms === 50).fn(); assert.equal(h.masks().length, 2);
   h.masks()[1].resolve(response()); await new Promise(resolve => setImmediate(resolve));
-  h.advance(500); h.intervals[0].fn(); assert.equal(h.masks().length, 2);
+  h.advance(500); h.intervals.find(timer => timer.ms === 50).fn(); assert.equal(h.masks().length, 2);
   h.state.remoteFrameId++; h.state.running = false;
-  h.intervals[0].fn(); assert.equal(h.masks().length, 2);
+  h.intervals.find(timer => timer.ms === 50).fn(); assert.equal(h.masks().length, 2);
   h.navigation()[0].resolve(response()); await pending;
 });

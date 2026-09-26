@@ -92,7 +92,7 @@ route. Demo mode returns uncertainty rather than fabricated detections.
 The persistent dashboard QR code opens `mobile.html`. Camera frames, voice
 transcripts, permission changes, and audio playback status travel from the phone
 to its paired dashboard. Guidance and session state travel back to the phone.
-Losing the pairing or fresh camera frames pauses guidance. The phone supports
+Losing pairing pauses guidance; interrupted frame delivery waits for automatic recovery. The phone supports
 repeating a cue and pausing/resuming without exposing debug controls.
 
 Phone camera and microphone permissions require HTTPS. The phone launcher can
@@ -143,3 +143,82 @@ bounding boxes and configurable planning padding:
 
 This Phase 1 tool is deliberately isolated from the navigation engine, A*, and
 spoken guidance until real-room masks have been reviewed.
+
+## Stateful navigation and pickup
+
+The Windows dashboard owns a separate navigation controller for each paired
+session. Gemini returns observations; the controller handles SEARCH, ALIGN,
+APPROACH, RECOVER, HOLD, PICKUP, and COMPLETE. Backend candidate scoring has no
+shared cross-session target history.
+
+- Alignment enters within horizontal image coordinates 0.30–0.70 and stays
+  aligned within 0.20–0.80. Two consistent outside observations change direction.
+- Each walking cue is one bounded step. Duplicate frames cannot authorize steps;
+  ordinary repeated cues are suppressed for eight seconds.
+- Target occupancy is separate from approach and reach access. A bottle on the
+  floor stays occupied space but can lead to pickup instead of a detour.
+- Two usable reach assessments, confidence >= 0.8, clear reach evidence, and a
+  pickup-suitable target enable coarse pickup cues. A visible hand is optional.
+- Say **got it**, **can't reach it**, **lost it**, **repeat**, **pause**, or **find …**.
+  Continue using Tap to speak; this is not continuous voice recognition.
+
+### Recovery and phone sensors
+
+The permission button also requests orientation access when the browser needs
+it. Sensor denial leaves visual search available. Frame sequence, phone-monotonic
+capture time, stream ID, and orientation travel together. Orientation updates run
+at up to 10 Hz; current phone timestamps anchor dashboard evidence age without
+assuming synchronized Windows and phone wall clocks.
+
+Recovery remembers the last viewing direction, not a metric room location. It
+corrects after a >15° error persists for 300 ms, settles below 8°, and speaks at
+most every three seconds. Memory expires after 12 seconds, sensor staleness over
+500 ms, reference/screen changes, reconnection, target changes, or a walking cue.
+Nearly vertical camera poses disable horizontal bearing corrections.
+
+### Obstacle feedback and freshness
+
+A fresh, confidence >=0.8 obstacle assessment must explicitly identify apparent
+close proximity, intrusion, and evidence to trigger a named warning. This is
+not measured distance or continuous collision detection. The NVIDIA mask does
+not supply depth and cannot independently trigger proximity warnings.
+
+The phone requests a 200/100/200 ms double vibration pulse immediately, then
+speaks the warning. Unsupported/rejected vibration uses a locally generated tone.
+Feedback requires browser interaction; API acceptance does not prove a physical
+vibration occurred. A hazard interrupts and discards voice recording so warning
+audio cannot become a command. Repeat alerts require newer evidence and at least
+four seconds. Two clear assessments remove the hazard; age alone never clears it.
+
+Walking, pickup, and close-proximity cues have no wall-clock expiration. New
+movement requires a frame captured after the previous movement cue. Substantial
+heading changes invalidate pending views. Pause, a new target, disconnection, or
+replacement guidance cancels pending speech. Blank frames and service failures have separate
+messages. Rate-limited Gemini models are temporarily skipped on subsequent frames. The dashboard shows why a cue was held or suppressed.
+
+Thresholds are centralized in `frontend/navigation-controller.js` DEFAULTS.
+The dashboard displays stage, evidence, memory, hazard, and sensor/haptic status.
+Debug exports contain bounded observation history (100 items / 60 seconds),
+without camera image bytes. Restart/reload loses this in-memory state.
+
+### Verification
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -p 'test_*.py'
+node --test tests/*.test.cjs
+```
+
+Automated suites cover schema compatibility, bounds, replayed navigation, phone
+feedback, sensor geometry, freshness, and dashboard-to-phone messages. Physical
+acceptance still requires iPhone Safari and Android Chrome: verify the named
+warning and vibration/tone, portrait/landscape overshoot recovery, camera tilt,
+permission denial, and floor-object pickup with a separate obstacle nearby.
+
+Camera delivery tolerates gaps up to ten seconds before issuing one waiting message; fresh frames resume analysis automatically without a Resume tap. Phone uploads are capped at 960 pixels on the long edge to reduce tunnel congestion. Close warnings require separate proximity confidence of at least 0.85; object recognition confidence alone does not imply distance. Target-support objects (such as a trash can holding a cup) remain occupied space for walking, but clear, consistently reachable targets can transition to pickup on that surface. These are monocular estimates, not measured distances.
+Supported targets use a general approach-stop-reach sequence: distant target supports do not block an explicitly clear next step, while close/uncertain supports and separate barriers still prevent walking. This applies by relationship, not by furniture name.
+
+Incremental guidance update: model results and modern speech cues no longer expire solely with elapsed time. Each movement cue establishes a capture boundary; the next movement needs a frame captured after it. Duplicate/out-of-order frames and results invalidated by a substantial comparable heading change (25 degrees) are rejected. Pause, target changes and disconnection still cancel guidance. The ten-second camera-delivery watchdog is separate from result validity. Orientation-memory age limits remain for recovery only. No step-completion or translation detector is implemented; the user follows the take-one-step-then-pause workflow.
+
+### NVIDIA-driven approach
+The dashboard enables routeMode: local masks now supply the walking/turning choice, independently of the Gemini loop. A 32x24 grid requires 85% candidate-floor coverage per cell, lateral clearance, and connectivity from the near-center camera region. Short candidate routes bias toward Gemini's target direction. The yellow line shows the selected route over the green floor. Unknown pixels, disconnected islands and furniture are excluded; no connected route holds position. Two masks must agree before turning. Gemini supplies target identity/location and pickup/reach context; its broad approach-sector warnings no longer override available floor routes. Named close warnings require a blocked NVIDIA route plus a close obstacle overlapping the near-center path. Pickup still requires two reach assessments. These image-space routes do not measure body clearance, distance, drop-offs, or overhead hazards; physical room trials remain necessary.
+Reach handoff: likely_reachable does not qualify for pickup or stop NVIDIA; easily_reachable with a comfortable grasp and no stepping, leaning or stretching is required. A reach-check pause requires pickup suitability, clear reach, evidence and no separate reach obstruction; two consistent observations enter pickup. Say too far or cannot reach it to request another mask-guided approach step before rechecking reach. The correction never bypasses a blocked floor route.
