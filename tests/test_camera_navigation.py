@@ -16,6 +16,28 @@ class CameraRelativeNavigationTests(unittest.TestCase):
     def test_center_target_with_open_center_moves_forward(self) -> None:
         self.assertEqual(self.decide("open_center"), NavigationAction.FORWARD)
 
+    def test_a_star_grid_selects_next_step_toward_target(self) -> None:
+        state = self.scenarios["open_center"]
+        grid = [
+            [1, 1, 2, 1, 1],
+            [1, 1, 1, 1, 1],
+            [1, 1, 1, 1, 1],
+            [1, 1, -1, 1, 1],
+        ]
+        decision = CameraRelativeNavigator().decide(state, grid=grid)
+        self.assertEqual(decision.action, NavigationAction.FORWARD)
+
+    def test_a_star_grid_selects_horizontal_detour(self) -> None:
+        state = self.scenarios["open_center"]
+        grid = [
+            [1, 1, 1, 1, 2],
+            [1, 1, 0, 1, 1],
+            [1, 1, 0, 1, 1],
+            [1, 1, -1, 1, 1],
+        ]
+        decision = CameraRelativeNavigator().decide(state, grid=grid)
+        self.assertEqual(decision.action, NavigationAction.TURN_RIGHT)
+
     def test_right_target_turns_right_around_center_chair(self) -> None:
         decision = CameraRelativeNavigator().decide(self.scenarios["right_around_chair"])
         self.assertEqual(decision.action, NavigationAction.TURN_RIGHT)

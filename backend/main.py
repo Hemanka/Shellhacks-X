@@ -62,6 +62,7 @@ class FrameRequest(BaseModel):
     target_object: str = Field(default="object", min_length=1, max_length=100)
     heading_deg: float = Field(default=0, ge=-360, le=360)
     capture_ms: float = Field(default=0, ge=0, le=60_000)
+    target_bbox: tuple[float, float, float, float] | None = None
 
 
 class SpeechRequest(BaseModel):
@@ -182,12 +183,17 @@ def decode_image(data: str) -> bytes:
         raise HTTPException(status_code=400, detail="Invalid camera image encoding") from exc
 
 
-def traversability_result(image_bytes: bytes) -> dict[str, Any]:
+def traversability_result(
+    image_bytes: bytes,
+    target_bbox: tuple[float, float, float, float] | None = None,
+) -> dict[str, Any]:
     """Run Phase 1 semantic segmentation and serialize its live debug overlay."""
     started = perf_counter()
     try:
         with Image.open(BytesIO(image_bytes)) as source:
-            mask = traversability_segmenter.segment(source.convert("RGB"))
+            mask = traversability_segmenter.segment(
+                source.convert("RGB"), target_bbox=target_bbox
+            )
     except (UnidentifiedImageError, OSError) as exc:
         raise HTTPException(status_code=400, detail="Invalid camera image") from exc
     except Exception as exc:
@@ -213,6 +219,27 @@ def traversability_result(image_bytes: bytes) -> dict[str, Any]:
         "height": mask.height,
         "label": "candidate traversable — not verified safe",
     }
+
+
+def navigation_grid(
+    image_bytes: bytes,
+    perception: PerceptionState,
+) -> list[list[int]] | None:
+    """Build the NVIDIA grid used by the A* navigation decision."""
+    target = perception.target
+    if target is None or not target.visible or target.bbox is None:
+        return None
+    try:
+        with Image.open(BytesIO(image_bytes)) as source:
+            traversability_segmenter.segment(
+                source.convert("RGB"), target_bbox=target.bbox
+            )
+        if traversability_segmenter.grid is None:
+            return None
+        return traversability_segmenter.grid.tolist()
+    except Exception as exc:
+        print(f"A* navigation grid unavailable: {exc}")
+        return None
 
 
 def label_matches(label: str, target: str) -> bool:
@@ -450,6 +477,7 @@ def analyze_frame(payload: FrameRequest) -> dict[str, Any]:
         perception = uncertain_perception(payload.target_object)
         source = "fallback"
 
+    grid = None if rate_limited else navigation_grid(image_bytes, perception)
     if rate_limited:
         decision = NavigationDecision(
             action=NavigationAction.HOLD,
@@ -459,7 +487,7 @@ def analyze_frame(payload: FrameRequest) -> dict[str, Any]:
             candidate_scores={NavigationAction.HOLD: 0.0},
         )
     else:
-        decision = navigation_engine.decide(perception)
+        decision = navigation_engine.decide(perception, grid=grid)
     return navigation_result(
         payload,
         perception,
@@ -478,7 +506,9 @@ def analyze_frame(payload: FrameRequest) -> dict[str, Any]:
 @app.post("/api/traversability-frame")
 def analyze_traversability_frame(payload: FrameRequest) -> dict[str, Any]:
     """Return the local Phase 1 mask independently from cloud navigation."""
-    return traversability_result(decode_image(payload.image_base64))
+    return traversability_result(
+        decode_image(payload.image_base64), payload.target_bbox
+    )
 
 
 app.mount("/", StaticFiles(directory=ROOT / "frontend", html=True), name="frontend")

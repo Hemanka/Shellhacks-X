@@ -62,9 +62,16 @@ class TargetObservation:
     label: str
     direction: Direction
     confidence: float
+    bbox: tuple[float, float, float, float] | None = None
 
     def __post_init__(self) -> None:
         _check_confidence("target confidence", self.confidence)
+        if self.bbox is not None:
+            left, top, right, bottom = self.bbox
+            if any(not 0 <= coordinate <= 1 for coordinate in self.bbox):
+                raise ValueError("target bbox coordinates must be normalized between 0 and 1")
+            if right <= left or bottom <= top:
+                raise ValueError("target bbox must have positive width and height")
 
 
 @dataclass(frozen=True, slots=True)

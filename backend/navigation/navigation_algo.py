@@ -125,6 +125,3 @@ def instruction(grid: list[list[int]]) -> list[str]:
 
 	return instruction_set
 
-set_of_instruction = instruction(sample_grid)
-for i in set_of_instruction:
-	print(i)

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Sequence
 from dataclasses import dataclass
 from time import perf_counter
 
+from ..traversability.connect_target_obj import connect_target_object
+from .navigation_algo import a_star
 from .types import (
     Direction,
     NavigationAction,
@@ -51,10 +54,32 @@ class CameraRelativeNavigator:
         self.detour_direction = None
         self.detour_forward_count = 0
 
-    def decide(self, perception: PerceptionState) -> NavigationDecision:
+    def decide(
+        self,
+        perception: PerceptionState,
+        grid: Sequence[Sequence[int]] | None = None,
+    ) -> NavigationDecision:
         started = perf_counter()
         previous_action = self.previous_action
 
+        grid_decision = self._grid_decision(perception, grid, started)
+        if grid_decision is not None:
+            decision = grid_decision
+        else:
+            decision = self._reactive_decision(perception, started, previous_action)
+
+        self.history.append(perception)
+        self.previous_action = decision.action
+        if self.debug:
+            print(format_debug(perception, decision))
+        return decision
+
+    def _reactive_decision(
+        self,
+        perception: PerceptionState,
+        started: float,
+        previous_action: NavigationAction | None,
+    ) -> NavigationDecision:
         statuses = {
             perception.sectors.left.status,
             perception.sectors.center.status,
@@ -89,12 +114,58 @@ class CameraRelativeNavigator:
                     decision = self._scored_decision(
                         effective_perception, started, previous_action
                     )
-
-        self.history.append(perception)
-        self.previous_action = decision.action
-        if self.debug:
-            print(format_debug(perception, decision))
         return decision
+
+    def _grid_decision(
+        self,
+        perception: PerceptionState,
+        grid: Sequence[Sequence[int]] | None,
+        started: float,
+    ) -> NavigationDecision | None:
+        if grid is None:
+            return None
+        try:
+            path = a_star(connect_target_object(grid))
+        except (TypeError, ValueError):
+            return None
+        if not path:
+            return None
+        if len(path) == 1:
+            action = NavigationAction.ARRIVED
+            reason = "The A* path has reached the target object."
+        else:
+            (current_x, current_y), (next_x, next_y) = path[:2]
+            horizontal_delta = next_x - current_x
+            vertical_delta = next_y - current_y
+            if horizontal_delta < 0:
+                action = NavigationAction.TURN_LEFT
+                reason = "A* selected the next open cell to the left."
+            elif horizontal_delta > 0:
+                action = NavigationAction.TURN_RIGHT
+                reason = "A* selected the next open cell to the right."
+            elif vertical_delta < 0:
+                action = NavigationAction.FORWARD
+                reason = "A* selected the next open cell ahead."
+            else:
+                action = NavigationAction.HOLD
+                reason = "A* selected a reverse step, which is not supported."
+
+        confidence_values = [perception.scene_confidence]
+        if perception.target:
+            confidence_values.append(perception.target.confidence)
+        confidence = round(min(confidence_values), 3)
+        return NavigationDecision(
+            action=action,
+            confidence=confidence,
+            reason=reason,
+            should_replan=action not in {
+                NavigationAction.FORWARD,
+                NavigationAction.ARRIVED,
+            },
+            candidate_scores={action: 0.0},
+            previous_action=self.previous_action,
+            latency_ms=(perf_counter() - started) * 1000,
+        )
 
     def _with_recent_target(
         self, perception: PerceptionState

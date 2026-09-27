@@ -17,6 +17,7 @@ VALID_SCENE = {
         "label": "exit door",
         "direction": "RIGHT",
         "confidence": 0.91,
+        "bbox": [0.62, 0.25, 0.88, 0.85],
     },
     "sectors": {
         "left": {"status": "OPEN", "confidence": 0.83},
@@ -35,6 +36,7 @@ class GeminiPerceptionValidationTests(unittest.TestCase):
         perception, error = parse_gemini_perception(VALID_SCENE, "exit door", timestamp=1)
         self.assertIsNone(error)
         self.assertEqual(perception.target.direction, Direction.RIGHT)
+        self.assertEqual(perception.target.bbox, (0.62, 0.25, 0.88, 0.85))
         self.assertEqual(perception.sectors.center.status, SectorStatus.BLOCKED)
         self.assertEqual(perception.obstacles[0].label, "chair")
 

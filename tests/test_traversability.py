@@ -11,6 +11,7 @@ from backend.traversability.debug import (
     render_debug,
     transparent_overlay,
 )
+from backend.traversability.segmenter import mark_target_bbox
 from backend.traversability.mask import (
     ObstacleBox,
     TraversabilityMask,
@@ -34,6 +35,12 @@ def candidate_mask(width: int = 10, height: int = 10) -> TraversabilityMask:
 
 
 class TraversabilityMaskTests(unittest.TestCase):
+    def test_target_bbox_cells_are_marked_as_two_in_grid(self) -> None:
+        grid = np.ones((10, 20), dtype=np.uint8)
+        mark_target_bbox(grid, (0.6, 0.2, 0.8, 0.5))
+        self.assertTrue((grid[2:5, 12:16] == 2).all())
+        self.assertEqual(int((grid == 2).sum()), 12)
+
     def test_floating_candidate_islands_become_disconnected(self) -> None:
         candidate = np.zeros((8, 8), dtype=np.bool_)
         candidate[4:, 1:7] = True

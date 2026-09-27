@@ -1,11 +1,31 @@
 from __future__ import annotations
 
+from pathlib import Path
+from threading import Lock
 from time import perf_counter
 
 import numpy as np
 from PIL import Image
 
 from .mask import SegmentationConfig, TraversabilityMask, retain_ground_connected
+
+
+def mark_target_bbox(
+    grid: np.ndarray,
+    target_bbox: tuple[float, float, float, float],
+) -> None:
+    """Mark every NVIDIA planning cell covered by Gemini's normalized bbox."""
+    left, top, right, bottom = target_bbox
+    if any(not 0 <= coordinate <= 1 for coordinate in target_bbox):
+        raise ValueError("target bbox coordinates must be normalized between 0 and 1")
+    if right <= left or bottom <= top:
+        raise ValueError("target bbox must have positive width and height")
+    height, width = grid.shape
+    left_column = max(0, min(width - 1, int(np.floor(left * width))))
+    top_row = max(0, min(height - 1, int(np.floor(top * height))))
+    right_column = max(left_column + 1, min(width, int(np.ceil(right * width))))
+    bottom_row = max(top_row + 1, min(height, int(np.ceil(bottom * height))))
+    grid[top_row:bottom_row, left_column:right_column] = 2
 
 
 class SegformerTraversabilitySegmenter:
@@ -17,36 +37,44 @@ class SegformerTraversabilitySegmenter:
         self._model = None
         self._device = None
         self.grid = None
+        self._load_lock = Lock()
 
     def _load(self) -> None:
         if self._model is not None:
             return
-        import torch
-        from transformers import AutoImageProcessor, SegformerForSemanticSegmentation
+        with self._load_lock:
+            if self._model is not None:
+                return
+            import torch
+            from transformers import AutoImageProcessor, SegformerForSemanticSegmentation
 
-        if torch.backends.mps.is_available():
-            device = torch.device("mps")
-        elif torch.cuda.is_available():
-            device = torch.device("cuda")
-        else:
-            device = torch.device("cpu")
-        try:
-            self._processor = AutoImageProcessor.from_pretrained(
-                self.config.model_id, local_files_only=True
-            )
-            self._model = SegformerForSemanticSegmentation.from_pretrained(
-                self.config.model_id, local_files_only=True
-            )
-        except OSError:
-            self._processor = AutoImageProcessor.from_pretrained(self.config.model_id)
-            self._model = SegformerForSemanticSegmentation.from_pretrained(
-                self.config.model_id
-            )
-        self._model = self._model.to(device)
-        self._model.eval()
-        self._device = device
+            if torch.backends.mps.is_available():
+                device = torch.device("mps")
+            elif torch.cuda.is_available():
+                device = torch.device("cuda")
+            else:
+                device = torch.device("cpu")
+            try:
+                self._processor = AutoImageProcessor.from_pretrained(
+                    self.config.model_id, local_files_only=True
+                )
+                self._model = SegformerForSemanticSegmentation.from_pretrained(
+                    self.config.model_id, local_files_only=True
+                )
+            except OSError:
+                self._processor = AutoImageProcessor.from_pretrained(self.config.model_id)
+                self._model = SegformerForSemanticSegmentation.from_pretrained(
+                    self.config.model_id
+                )
+            self._model = self._model.to(device)
+            self._model.eval()
+            self._device = device
 
-    def segment(self, image: Image.Image) -> TraversabilityMask:
+    def segment(
+        self,
+        image: Image.Image,
+        target_bbox: tuple[float, float, float, float] | None = None,
+    ) -> TraversabilityMask:
         import torch
         import torch.nn.functional as functional
 
@@ -126,5 +154,8 @@ class SegformerTraversabilitySegmenter:
             inference_ms=inference_ms,
         )
         grid = original_size(raw_candidate).astype(np.uint8)
+        if target_bbox is not None:
+            mark_target_bbox(grid, target_bbox)
         self.grid = grid
+        np.savetxt(Path(__file__).with_name("output.txt"), grid, fmt="%d")
         return mask

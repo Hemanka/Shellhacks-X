@@ -1,4 +1,4 @@
-const SCAN_INTERVAL_MS = 6000;
+const SCAN_INTERVAL_MS = 3000;
 
 const state = {
   running: false,
@@ -16,8 +16,7 @@ const state = {
   listening: false,
   analyzing: false,
   backoffUntil: 0,
-  lastSpokenAction: null,
-  lastSpokenAt: 0,
+  speechRequestId: 0,
 };
 const $ = (id) => document.getElementById(id);
 const targetInput = $("target-input");
@@ -36,6 +35,7 @@ let voiceRecorder = null;
 let voiceRecorderTimeout = null;
 
 function stopSpeaking() {
+  state.speechRequestId += 1;
   speechSequence += 1;
   window.speechSynthesis?.cancel();
   if (activeAudio) {
@@ -61,6 +61,7 @@ async function speak(text) {
   if (!command) return;
 
   stopSpeaking();
+  const requestId = state.speechRequestId;
   const sequence = speechSequence;
 
   try {
@@ -69,10 +70,11 @@ async function speak(text) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text: command }),
     });
-    if (!response.ok) throw new Error(`Speech service returned ${response.status}`);
+    if (!response.ok)
+      throw new Error(`Speech service returned ${response.status}`);
 
     const audioUrl = URL.createObjectURL(await response.blob());
-    if (sequence !== speechSequence) {
+    if (requestId !== state.speechRequestId || sequence !== speechSequence) {
       URL.revokeObjectURL(audioUrl);
       return;
     }
@@ -97,16 +99,16 @@ async function speak(text) {
     }
   } catch (error) {
     console.warn("ElevenLabs speech unavailable; using browser voice.", error);
-    speakWithBrowser(command, sequence);
+    if (requestId === state.speechRequestId)
+      speakWithBrowser(command, sequence);
   }
 }
 
-function setInstruction(title, sub, confidence = null, announce = true) {
+function setInstruction(title, sub, confidence = null) {
   $("instruction").textContent = title;
   $("instruction-sub").textContent = sub;
   $("confidence-value").textContent =
     confidence === null ? "—" : `${Math.round(confidence * 100)}%`;
-  if (announce && !state.listening) speak(`${title} ${sub}`);
 }
 
 function cleanSpokenTarget(transcript) {
@@ -136,7 +138,9 @@ function setTarget(target) {
   targetDisplay.classList.toggle("empty", !target);
   startButton.disabled = !target;
   if (!state.running) {
-    $("start-label").textContent = target ? "Start finding" : "Speak a target first";
+    $("start-label").textContent = target
+      ? "Start finding"
+      : "Speak a target first";
   }
   $("target-map-label").textContent = target ? target.toUpperCase() : "TARGET";
 }
@@ -146,8 +150,13 @@ function updateClock() {
   $("session-time").textContent =
     `${String(Math.floor(elapsed / 60)).padStart(2, "0")}:${String(elapsed % 60).padStart(2, "0")}`;
   if (state.running && state.nextScanAt) {
-    const seconds = Math.max(0, Math.ceil((state.nextScanAt - Date.now()) / 1000));
-    $("scan-status").textContent = seconds ? `WAITING ${seconds}S` : "CAPTURING";
+    const seconds = Math.max(
+      0,
+      Math.ceil((state.nextScanAt - Date.now()) / 1000),
+    );
+    $("scan-status").textContent = seconds
+      ? `WAITING ${seconds}S`
+      : "CAPTURING";
   }
 }
 function setScanStatus(status, cameraText = status) {
@@ -232,19 +241,12 @@ function applyNavigationDecision(result) {
   const target = result.perception?.target;
   if (!decision) return;
 
-  const now = Date.now();
-  const announce =
-    decision.action !== state.lastSpokenAction || now - state.lastSpokenAt >= 6000;
   setInstruction(
     decision.voiceInstruction,
     decision.reason,
     decision.confidence,
-    announce,
   );
-  if (announce) {
-    state.lastSpokenAction = decision.action;
-    state.lastSpokenAt = now;
-  }
+  if (!state.listening) speak(decision.voiceInstruction);
 
   $("target-distance").textContent = target?.visible ? target.direction : "—";
   const targetPositions = { LEFT: "25%", CENTER: "50%", RIGHT: "75%" };
@@ -257,7 +259,11 @@ async function analyzeFrame() {
   if (state.analyzing) return;
   if (!state.stream && !state.remoteFrame) {
     $("camera-label").textContent = "NO FRAME TO ANALYZE";
-    setInstruction("Camera unavailable.", "Allow camera access before sending a frame to Gemini.", 0);
+    setInstruction(
+      "Camera unavailable.",
+      "Allow camera access before sending a frame to Gemini.",
+      0,
+    );
     return;
   }
   state.analyzing = true;
@@ -266,7 +272,10 @@ async function analyzeFrame() {
     if (state.remoteFrame) {
       const remoteImage = new Image();
       remoteImage.src = state.remoteFrame;
-      await new Promise((resolve) => { remoteImage.onload = resolve; remoteImage.onerror = resolve; });
+      await new Promise((resolve) => {
+        remoteImage.onload = resolve;
+        remoteImage.onerror = resolve;
+      });
       canvas.width = remoteImage.naturalWidth || 640;
       canvas.height = remoteImage.naturalHeight || 480;
       canvas.getContext("2d").drawImage(remoteImage, 0, 0);
@@ -284,20 +293,6 @@ async function analyzeFrame() {
       heading_deg: state.heading,
       capture_ms: captureMs,
     };
-    const maskRequest = fetch("/api/traversability-frame", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(requestBody),
-    })
-      .then(async (maskResponse) => {
-        if (!maskResponse.ok) throw new Error(`Mask service returned ${maskResponse.status}`);
-        return maskResponse.json();
-      })
-      .then(renderTraversability)
-      .catch((error) => {
-        $("traversability-readout").textContent = "MASK UNAVAILABLE";
-        console.warn("Traversability overlay unavailable.", error);
-      });
     const response = await fetch("/api/analyze-frame", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -315,7 +310,23 @@ async function analyzeFrame() {
       throw error;
     }
     const result = await response.json();
-    await maskRequest;
+    const targetBbox = result.perception?.target?.bbox;
+    try {
+      const maskResponse = await fetch("/api/traversability-frame", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...requestBody,
+          target_bbox: targetBbox,
+        }),
+      });
+      if (!maskResponse.ok)
+        throw new Error(`Mask service returned ${maskResponse.status}`);
+      renderTraversability(await maskResponse.json());
+    } catch (error) {
+      $("traversability-readout").textContent = "MASK UNAVAILABLE";
+      console.warn("Traversability overlay unavailable.", error);
+    }
     addSightings(result);
     if (result.rateLimited) {
       const retryMs = Math.max(result.retryAfterMs || 30000, SCAN_INTERVAL_MS);
@@ -327,13 +338,19 @@ async function analyzeFrame() {
         `Hold your position. Retrying in about ${retrySeconds} seconds.`,
         0,
       );
-      setScanStatus("COOLDOWN", `GEMINI RATE LIMITED / RETRY IN ${retrySeconds}S`);
+      setScanStatus(
+        "COOLDOWN",
+        `GEMINI RATE LIMITED / RETRY IN ${retrySeconds}S`,
+      );
       return;
     }
     state.backoffUntil = 0;
     applyNavigationDecision(result);
     state.nextScanAt = Date.now() + SCAN_INTERVAL_MS;
-    setScanStatus("WAITING 6S", `${result.decision.action} / WAITING 6S`);
+    setScanStatus(
+      `WAITING ${SCAN_INTERVAL_MS / 1000}S`,
+      `${result.decision.action} / WAITING ${SCAN_INTERVAL_MS / 1000}S`,
+    );
     $("heading-value").textContent =
       `${String(Math.round(result.heading_deg + 360) % 360).padStart(3, "0")}°`;
     console.info("Navigation cycle timings", result.timings);
@@ -348,8 +365,11 @@ async function pairPhoneCamera() {
   $("pairing-qr").src = pairing.qr_data_url;
   $("pairing-panel").hidden = false;
   const protocol = location.protocol === "https:" ? "wss" : "ws";
-  state.remoteSocket = new WebSocket(`${protocol}://${location.host}/ws/pair/${pairing.session_id}?role=pc`);
-  state.remoteSocket.onopen = () => setScanStatus("PHONE READY", "WAITING FOR PHONE CAMERA");
+  state.remoteSocket = new WebSocket(
+    `${protocol}://${location.host}/ws/pair/${pairing.session_id}?role=pc`,
+  );
+  state.remoteSocket.onopen = () =>
+    setScanStatus("PHONE READY", "WAITING FOR PHONE CAMERA");
   state.remoteSocket.onmessage = (event) => {
     const message = JSON.parse(event.data);
     if (message.type === "frame") {
@@ -366,7 +386,8 @@ async function pairPhoneCamera() {
 }
 async function connectCamera() {
   if (state.cameraActive) return true;
-  if (!navigator.mediaDevices?.getUserMedia) throw new Error("Camera API unavailable");
+  if (!navigator.mediaDevices?.getUserMedia)
+    throw new Error("Camera API unavailable");
   try {
     state.stream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: { ideal: "environment" } },
@@ -404,7 +425,10 @@ async function startSession() {
     clearInterval(state.scanTimer);
     state.nextScanAt = null;
     $("scan-status").textContent = "PAUSED";
-    setInstruction("Session paused.", "Press resume when you are ready to continue.");
+    setInstruction(
+      "Session paused.",
+      "Press resume when you are ready to continue.",
+    );
     return;
   }
   $("session-state").textContent = "Scanning";
@@ -426,10 +450,17 @@ async function startSession() {
     if (!state.cameraActive) {
       $("connection-label").textContent = "CAMERA ACCESS BLOCKED";
       $("camera-label").textContent = "ALLOW CAMERA ACCESS AND TRY AGAIN";
-      $("camera-placeholder")?.querySelector(".placeholder-kicker")?.replaceChildren("PERMISSION NEEDED");
-      $("camera-placeholder")?.querySelector("strong")?.replaceChildren("Camera access was blocked");
-      $("camera-placeholder")?.querySelector("span:last-child")?.replaceChildren("Allow camera access and try again.");
-      $("instruction-sub").textContent = "Allow camera access before starting the scan.";
+      $("camera-placeholder")
+        ?.querySelector(".placeholder-kicker")
+        ?.replaceChildren("PERMISSION NEEDED");
+      $("camera-placeholder")
+        ?.querySelector("strong")
+        ?.replaceChildren("Camera access was blocked");
+      $("camera-placeholder")
+        ?.querySelector("span:last-child")
+        ?.replaceChildren("Allow camera access and try again.");
+      $("instruction-sub").textContent =
+        "Allow camera access before starting the scan.";
     }
     console.warn("Camera unavailable; using demo detections.", error);
   }
@@ -476,26 +507,46 @@ async function startSession() {
 cameraButton.addEventListener("click", async () => {
   try {
     await connectCamera();
-    $("camera-placeholder").querySelector("strong").textContent = "Live camera connected";
-    setInstruction("Camera ready.", "The live camera is connected and ready to scan.");
+    $("camera-placeholder").querySelector("strong").textContent =
+      "Live camera connected";
+    setInstruction(
+      "Camera ready.",
+      "The live camera is connected and ready to scan.",
+    );
   } catch (error) {
     $("connection-label").textContent = "CAMERA ACCESS BLOCKED";
     $("camera-label").textContent = "ALLOW CAMERA ACCESS AND TRY AGAIN";
-    $("camera-placeholder").querySelector(".placeholder-kicker").textContent = "PERMISSION NEEDED";
-    $("camera-placeholder").querySelector("strong").textContent = "Camera access was blocked";
-    setInstruction("Camera access blocked.", "Allow camera access and try again.", 0);
+    $("camera-placeholder").querySelector(".placeholder-kicker").textContent =
+      "PERMISSION NEEDED";
+    $("camera-placeholder").querySelector("strong").textContent =
+      "Camera access was blocked";
+    setInstruction(
+      "Camera access blocked.",
+      "Allow camera access and try again.",
+      0,
+    );
     console.warn("Camera unavailable.", error);
   }
 });
-pairButton.addEventListener("click", () => pairPhoneCamera().catch((error) => setInstruction("Pairing unavailable.", error.message, 0)));
-closePairing.addEventListener("click", () => { $("pairing-panel").hidden = true; });
+pairButton.addEventListener("click", () =>
+  pairPhoneCamera().catch((error) =>
+    setInstruction("Pairing unavailable.", error.message, 0),
+  ),
+);
+closePairing.addEventListener("click", () => {
+  $("pairing-panel").hidden = true;
+});
 startButton.addEventListener("click", () =>
   startSession().catch((error) => {
     if (state.cameraActive) {
       $("camera-label").textContent = "LIVE CAMERA / GEMINI RETRYING";
       setInstruction("Vision analysis unavailable.", error.message, 0);
     } else {
-      setInstruction("Camera unavailable.", "Allow camera access before starting the scan.", 0);
+      setInstruction(
+        "Camera unavailable.",
+        "Allow camera access before starting the scan.",
+        0,
+      );
     }
     console.warn("Session failed.", error);
   }),
@@ -510,12 +561,16 @@ function resetVoiceControls() {
 
 async function useTranscript(transcript) {
   const recognizedTarget = cleanSpokenTarget(transcript);
-  if (!recognizedTarget) throw new Error("I did not hear a target. Tap the button and try again.");
+  if (!recognizedTarget)
+    throw new Error("I did not hear a target. Tap the button and try again.");
 
   setTarget(recognizedTarget);
   $("voice-label").textContent = `Finding: ${recognizedTarget}`;
   if (state.running) {
-    setInstruction("Target updated.", `Now looking for your ${recognizedTarget}.`);
+    setInstruction(
+      "Target updated.",
+      `Now looking for your ${recognizedTarget}.`,
+    );
     await analyzeFrame();
   } else {
     await startSession();
@@ -530,7 +585,10 @@ async function transcribeVoiceCommand(audioBlob) {
   const form = new FormData();
   form.append("file", audioBlob, `voice-command.${extension}`);
 
-  const response = await fetch("/api/transcribe", { method: "POST", body: form });
+  const response = await fetch("/api/transcribe", {
+    method: "POST",
+    body: form,
+  });
   if (!response.ok) {
     let detail = "I could not understand that. Please try again.";
     try {
@@ -566,18 +624,31 @@ micButton.addEventListener("click", async () => {
 
   let stream;
   try {
-    stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-    const preferredTypes = ["audio/webm;codecs=opus", "audio/mp4", "audio/webm"];
-    const mimeType = preferredTypes.find((type) => MediaRecorder.isTypeSupported(type));
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: true,
+      video: false,
+    });
+    const preferredTypes = [
+      "audio/webm;codecs=opus",
+      "audio/mp4",
+      "audio/webm",
+    ];
+    const mimeType = preferredTypes.find((type) =>
+      MediaRecorder.isTypeSupported(type),
+    );
     const chunks = [];
-    voiceRecorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+    voiceRecorder = mimeType
+      ? new MediaRecorder(stream, { mimeType })
+      : new MediaRecorder(stream);
     voiceRecorder.addEventListener("dataavailable", (event) => {
       if (event.data.size) chunks.push(event.data);
     });
     voiceRecorder.addEventListener("stop", async () => {
       clearTimeout(voiceRecorderTimeout);
       stream.getTracks().forEach((track) => track.stop());
-      const audioBlob = new Blob(chunks, { type: voiceRecorder.mimeType || "audio/webm" });
+      const audioBlob = new Blob(chunks, {
+        type: voiceRecorder.mimeType || "audio/webm",
+      });
       voiceRecorder = null;
       try {
         await transcribeVoiceCommand(audioBlob);
@@ -595,9 +666,10 @@ micButton.addEventListener("click", async () => {
   } catch (error) {
     stream?.getTracks().forEach((track) => track.stop());
     resetVoiceControls();
-    const message = error.name === "NotAllowedError"
-      ? "Microphone access is blocked. Allow it and try again."
-      : "I cannot access a microphone on this device.";
+    const message =
+      error.name === "NotAllowedError"
+        ? "Microphone access is blocked. Allow it and try again."
+        : "I cannot access a microphone on this device.";
     $("voice-label").textContent = message;
     speak(message);
     console.warn("Could not record a voice command.", error);

@@ -26,6 +26,7 @@ The current endpoint asks Gemini for normalized bounding boxes and target matchi
 Click **Use phone camera** on the PC, then scan the QR code with the phone. The phone opens `mobile.html`, captures its camera, and relays JPEG frames to the PC over a WebSocket. The PC continues sending the latest phone frame to Gemini.
 
 Phone camera permissions require a secure context. For a phone on the same Wi-Fi, run the app behind HTTPS and set `PAIR_HOST`, `PAIR_SCHEME=https`, and `PAIR_PORT=443` in `.env`; an HTTPS tunnel such as ngrok is the simplest local setup. The PC and phone must be able to reach the generated URL.
+
 ## ElevenLabs text to speech
 
 Set `ELEVENLABS_API_KEY` in `.env` to have every live guidance instruction spoken with ElevenLabs. The browser calls the local `/api/speech` endpoint, so the secret key remains on the backend. You can optionally set `ELEVENLABS_VOICE_ID` and `ELEVENLABS_MODEL_ID`; the defaults use the George voice and the low-latency `eleven_flash_v2_5` model. If ElevenLabs is unavailable or not configured, Wayfinder automatically falls back to the browser's built-in speech synthesis so guidance remains audible.
@@ -59,10 +60,10 @@ bounding boxes and configurable planning padding:
 ```json
 {
   "obstacles": [
-    {"label": "chair", "bbox": [0.3, 0.35, 0.6, 0.9], "confidence": 0.92}
+    { "label": "chair", "bbox": [0.3, 0.35, 0.6, 0.9], "confidence": 0.92 }
   ]
 }
 ```
 
-This Phase 1 tool is deliberately isolated from the navigation engine, A*, and
+This Phase 1 tool is deliberately isolated from the navigation engine, A\*, and
 spoken guidance until real-room masks have been reviewed.

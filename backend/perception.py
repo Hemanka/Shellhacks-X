@@ -25,6 +25,11 @@ Identify the requested navigation target if visible. Divide the forward camera
 view into LEFT, CENTER, and RIGHT regions. For each region determine whether an
 obvious physical obstacle appears to block movement through that visible region.
 
+When the target is visible, return its normalized bounding box as
+[left, top, right, bottom], where coordinates range from 0 to 1, x increases
+from left to right, and y increases from top to bottom. Return null when the
+target is not visible.
+
 Search the entire full-resolution frame for the requested target, including
 small or distant instances. Do not require the target to be close to the camera.
 Use the target's visual center to assign LEFT, CENTER, RIGHT, or UNKNOWN. Do not
@@ -55,8 +60,14 @@ GEMINI_PERCEPTION_SCHEMA: dict[str, Any] = {
                 "label": {"type": "string"},
                 "direction": {"type": "string", "enum": [item.value for item in Direction]},
                 "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                "bbox": {
+                    "type": ["array", "null"],
+                    "items": {"type": "number", "minimum": 0, "maximum": 1},
+                    "minItems": 4,
+                    "maxItems": 4,
+                },
             },
-            "required": ["visible", "label", "direction", "confidence"],
+            "required": ["visible", "label", "direction", "confidence", "bbox"],
         },
         "sectors": {
             "type": "object",
@@ -116,6 +127,7 @@ class _GeminiTarget(BaseModel):
     label: str
     direction: Direction
     confidence: float = Field(ge=0, le=1)
+    bbox: tuple[float, float, float, float] | None = None
 
 
 class _GeminiObstacle(BaseModel):
@@ -166,6 +178,7 @@ def parse_gemini_perception(
             label=target.label or requested_target,
             direction=target.direction,
             confidence=target.confidence,
+            bbox=target.bbox if target.visible else None,
         ),
         sectors=SectorObservations(
             left=SectorObservation(parsed.sectors.left.status, parsed.sectors.left.confidence),
@@ -190,6 +203,7 @@ def perception_to_dict(perception: PerceptionState) -> dict[str, Any]:
             "label": target.label,
             "direction": target.direction.value,
             "confidence": target.confidence,
+            "bbox": target.bbox,
         },
         "sectors": {
             name: {
