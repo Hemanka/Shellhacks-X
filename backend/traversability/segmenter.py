@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from threading import RLock
 from time import perf_counter
 
@@ -35,18 +36,20 @@ class SegformerTraversabilitySegmenter:
             device = torch.device("cuda")
         else:
             device = torch.device("cpu")
+        local_model = Path(__file__).resolve().parents[2] / ".runtime" / "segformer-model"
+        model_source = str(local_model) if (local_model / "model.safetensors").is_file() else self.config.model_id
         try:
             self._processor = AutoImageProcessor.from_pretrained(
-                self.config.model_id, local_files_only=True
+                model_source, local_files_only=True
             )
             self._model = SegformerForSemanticSegmentation.from_pretrained(
-                self.config.model_id, local_files_only=True
+                model_source, local_files_only=True
             )
         except OSError:
-            self._processor = AutoImageProcessor.from_pretrained(self.config.model_id)
-            self._model = SegformerForSemanticSegmentation.from_pretrained(
-                self.config.model_id
-            )
+            if model_source == str(local_model):
+                raise
+            self._processor = AutoImageProcessor.from_pretrained(model_source)
+            self._model = SegformerForSemanticSegmentation.from_pretrained(model_source)
         self._model = self._model.to(device)
         self._model.eval()
         self._device = device

@@ -1,7 +1,7 @@
 // Start at most four analyses per second; slow requests never accumulate.
 const SCAN_INTERVAL_MS = 250;
 const SCAN_POLL_MS = 50;
-const MASK_INTERVAL_MS = 500;
+const MASK_INTERVAL_MS = 250;
 
 const state = {
   running: false,
@@ -22,6 +22,10 @@ const state = {
   revision: 0,
   maskAnalyzing: false,
   nextMaskAt: 0,
+  localRouteFrameSeq: -1,
+  localRouteAnalyzing: false,
+  lastPerception: null,
+  lastPerceptionMeta: null,
   remoteFrameId: 0,
   analyzedRemoteFrameId: -1,
   remoteFrameAt: 0,
@@ -34,6 +38,7 @@ const targetDisplay = $("target-display");
 const startButton = $("start-button");
 const video = $("camera-feed");
 const canvas = document.createElement("canvas");
+const routeCanvas = document.createElement("canvas");
 function sendToPhone(message) {
   if (state.remoteSocket?.readyState !== WebSocket.OPEN) return false;
   state.remoteSocket.send(JSON.stringify(message)); return true;
@@ -42,7 +47,7 @@ function stopSpeaking() { sendToPhone({ type: 'stop_speech' }); }
 async function speak(text) {
   const command = text.trim(); if (!command) return;
   const sent = sendToPhone({ type: 'guidance', text: command });
-  window.WayfinderDashboard?.event('speech output', { text: command, sent });
+  window.SeekRDashboard?.event('speech output', { text: command, sent });
 }
 
 function phoneNow() {
@@ -54,8 +59,8 @@ const navigation = window.NavigationController ? new window.NavigationController
   setInstruction(cue.text, `${cue.stage} · ${cue.source}`, null, false);
   if (cue.type === 'PICKUP') setScanStatus('TARGET REACHED', 'NAVIGATION AND ROUTING PAUSED');
   sendToPhone({...cue,stream:state.frameMeta?.stream});
-  window.WayfinderDashboard?.event('speech output',cue);
-}, snapshot=>window.WayfinderDashboard?.controller?.(snapshot), {routeMode:true}) : null;
+  window.SeekRDashboard?.event('speech output',cue);
+}, snapshot=>window.SeekRDashboard?.controller?.(snapshot), {routeMode:true}) : null;
 setInterval(()=>{
   if (!navigation || !state.running || state.listening) return;
   if (['SEARCH','RECOVER'].includes(navigation.stage)) navigation.tick(phoneNow(),state.orientation);
@@ -66,14 +71,14 @@ function setInstruction(title, sub, confidence = null, announce = true, spokenTe
   $("instruction-sub").textContent = sub;
   $("confidence-value").textContent =
     confidence === null ? "—" : `${Math.round(confidence * 100)}%`;
-  window.WayfinderDashboard?.instruction(title, sub);
+  window.SeekRDashboard?.instruction(title, sub);
   if (announce && !state.listening) speak(spokenText ?? `${title} ${sub}`);
 }
 
 function cleanSpokenTarget(transcript) {
   let target = transcript.trim().replace(/[.!?]+$/, "");
   target = target.replace(
-    /^(?:(?:hey(?:\s+there)?|hi|hello|okay|ok|um+|uh+|well|wayfinder)[,\s]+)+/i,
+    /^(?:(?:hey(?:\s+there)?|hi|hello|okay|ok|um+|uh+|well|seekr|seeker)[,\s]+)+/i,
     "",
   );
   const prefixes = [
@@ -82,6 +87,7 @@ function cleanSpokenTarget(transcript) {
     /^(?:please\s+)?i\s+(?:want|need|would like)(?:\s+you)?\s+to\s+(?:help\s+me\s+)?(?:find|locate|look for)\s+(?:me\s+)?/i,
     /^(?:please\s+)?i(?:'m| am)\s+looking\s+for\s+/i,
     /^(?:where is|where are)\s+/i,
+    /^(?:please\s+)?(?:i(?:'d|d| would)?\s+like|i\s+(?:need|want))\s+(?:to find\s+)?/i,
   ];
   for (const prefix of prefixes) target = target.replace(prefix, "");
   return target
@@ -94,6 +100,7 @@ function cleanSpokenTarget(transcript) {
 function setTarget(target) {
   state.revision += 1;
   navigation?.reset(target); stopSpeaking();
+  state.lastPerception = null; state.lastPerceptionMeta = null; state.localRouteFrameSeq = -1;
   state.nextScanAt = 0;
   state.lastSpokenKey = null;
   targetInput.value = target;
@@ -236,11 +243,11 @@ function updateTraversability(requestBody, isCurrent) {
       }
       return response.json();
     })
-    .then((result) => { if (isCurrent()) { renderTraversability(result); window.WayfinderDashboard?.mask(result); return result; } return null; })
+    .then((result) => { if (isCurrent()) { renderTraversability(result); window.SeekRDashboard?.mask(result); return result; } return null; })
     .catch((error) => {
       state.nextMaskAt = Date.now() + 10000;
       if (isCurrent()) $("traversability-readout").textContent = "MASK UNAVAILABLE";
-      window.WayfinderDashboard?.event("mask error", { message: error.message });
+      window.SeekRDashboard?.event("mask error", { message: error.message });
       console.warn("Traversability overlay unavailable.", error);
       return null;
     })
@@ -249,25 +256,90 @@ function updateTraversability(requestBody, isCurrent) {
 
 async function requestRouteForFrame(maskResult, perception, isCurrent) {
   if (!maskResult?.frame_meta || !isCurrent() || navigation?.pickupPending) return;
+  const frameMeta = maskResult.frame_meta;
+  if (frameMeta.stream !== state.frameMeta?.stream
+    || frameMeta.capturedAt - (state.lastPerceptionMeta?.capturedAt ?? -Infinity) > 5000) return;
+  if (!isCurrent() || !state.running || state.listening) return;
+  navigation?.observeRoute({pathPlan:maskResult.pathPlan, maskSignature:maskResult.maskSignature,
+    width:maskResult.width, height:maskResult.height}, frameMeta, phoneNow(), state.orientation,
+    perception, state.lastPerceptionMeta);
+}
+
+// Keep navigation requests focused on concrete, recognizable items. The final
+// word is the item class; preceding words may describe its appearance.
+const ITEM_NOUNS = new Set((
+  'key keys keychain wallet purse handbag backpack bag tote suitcase box package envelope cup cups mug mugs '
+  +'glass glasses bottle bottles flask thermos bowl bowls plate plates dish spoon fork knife pan pot kettle '
+  +'toaster blender microwave refrigerator fridge freezer oven coffeemaker maker hoodie hoodies jacket coat shirt '
+  +'tshirt sweater sweatshirt pants jeans shorts dress skirt sock socks shoe shoes sneaker sneakers boot boots '
+  +'sandal hat cap scarf glove gloves belt tie book books notebook binder folder paper pen pencil marker crayon '
+  +'eraser ruler stapler scissors calculator phone smartphone cellphone tablet laptop computer keyboard mouse monitor '
+  +'headphone headphones earbud earbuds charger cable cord adapter remote controller camera watch sunglasses case '
+  +'chair table tables lamp desk shelf mirror towel blanket pillow sheet comforter toy doll ball toothbrush toothpaste comb brush '
+  +'hairbrush razor soap shampoo deodorant lotion apple banana orange pear snack can jar tin container bowl '
+  +'umbrella flashlight torch battery batteries powerbank power bank headphones ring necklace bracelet earring earrings '
+  +'tool hammer screwdriver wrench pliers drill tape glue paintbrush paintbrushes shoehorn couch sofa dresser cabinet drawer nightstand bed sign signs sanitizer '
+  +'stroller bicycle bike helmet headphones'
+).split(/\s+/));
+const TARGET_NON_ITEM_WORDS = new Set((
+  'in on under beneath below above behind beside near next to inside outside around toward towards through room '
+  +'kitchen bathroom bedroom hallway hall floor upstairs downstairs door doorway exit entrance window garage '
+  +'someone person people man woman child dog cat end task session navigation finish stop find locate look '
+  +'holding wearing carrying bring take go get please i me my we you your our their them this that these those '
+  +'need want would could should give send move put place someone somebody and or then'
+).split(/\s+/));
+function isItemDescription(target) {
+  const words = target.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').trim().split(/\s+/).filter(Boolean);
+  if (!words.length || words.length > 6 || !ITEM_NOUNS.has(words.at(-1))) return false;
+  return !words.some(word => TARGET_NON_ITEM_WORDS.has(word));
+}
+
+async function analyzeLocalRouteFrame() {
+  if (!state.running || state.listening || state.localRouteAnalyzing || state.maskAnalyzing
+    || Date.now() < state.nextMaskAt || navigation?.pickupPending || !state.lastPerception
+    || !state.lastPerceptionMeta || !state.frameMeta || !state.cameraActive) return;
+  const perception = state.lastPerception, perceptionMeta = state.lastPerceptionMeta;
+  const target = perception.target;
+  if (!target?.visible || target.confidence < .8 || !state.frameMeta.stream
+    || state.frameMeta.stream !== perceptionMeta.stream
+    || state.frameMeta.capturedAt < perceptionMeta.capturedAt
+    || state.frameMeta.capturedAt - perceptionMeta.capturedAt > 5000
+    || state.frameMeta.seq <= state.localRouteFrameSeq
+    || Date.now() - state.remoteFrameAt > 1000) return;
+
+  const revision = state.revision, targetName = targetInput.value;
+  const isCurrent = () => state.running && !state.listening && state.revision === revision
+    && targetInput.value === targetName && state.lastPerception === perception
+    && state.lastPerceptionMeta === perceptionMeta && !navigation?.pickupPending;
+  const frameMeta = JSON.parse(JSON.stringify(state.frameMeta));
+  const remoteFrame = state.remoteFrame;
+  state.localRouteFrameSeq = frameMeta.seq;
+  state.localRouteAnalyzing = true;
   try {
-    const response = await fetch("/api/traversability-route", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ frame_meta: maskResult.frame_meta, perception }),
-    });
-    if (!response.ok) {
-      let detail = '';
-      try { detail = (await response.json()).detail || ''; } catch {}
-      throw new Error(`Route service returned ${response.status}${detail ? `: ${detail}` : ''}`);
+    if (remoteFrame) {
+      const image = new Image();
+      await new Promise((resolve, reject) => {
+        image.onload = resolve;
+        image.onerror = () => reject(new Error('Phone frame could not be decoded for route planning'));
+        image.src = remoteFrame;
+      });
+      routeCanvas.width = image.naturalWidth || 640;
+      routeCanvas.height = image.naturalHeight || 480;
+      routeCanvas.getContext('2d').drawImage(image, 0, 0);
+    } else {
+      routeCanvas.width = video.videoWidth || 640;
+      routeCanvas.height = video.videoHeight || 480;
+      routeCanvas.getContext('2d').drawImage(video, 0, 0);
     }
-    const result = await response.json();
-    if (isCurrent() && state.running && !state.listening) {
-      navigation?.observeRoute(result, result.frame_meta, phoneNow(), state.orientation);
-    }
+    if (!isCurrent()) return;
+    const requestBody = {image_base64:routeCanvas.toDataURL('image/jpeg', .8),
+      target_object:targetInput.value, heading_deg:state.heading, frame_meta:frameMeta, perception};
+    const maskResult = await updateTraversability(requestBody, isCurrent);
+    if (maskResult) await requestRouteForFrame(maskResult, perception, isCurrent);
   } catch (error) {
-    if (isCurrent()) window.WayfinderDashboard?.event("route error", { message: error.message });
-    console.warn("Matching-frame route plan unavailable.", error);
-  }
+    if (isCurrent()) window.SeekRDashboard?.event('route error', {message:error.message});
+    console.warn('Fast local route update unavailable.', error);
+  } finally { state.localRouteAnalyzing = false; }
 }
 
 async function analyzeFrame() {
@@ -316,9 +388,6 @@ async function analyzeFrame() {
       capture_ms: captureMs,
       frame_meta: frameMeta,
     };
-    // Start local segmentation while Gemini analyzes this identical JPEG.
-    // The route request waits for both and then reuses the cached exact-frame mask.
-    const maskTask = updateTraversability(requestBody, isCurrent);
     const response = await fetch("/api/analyze-frame", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -337,7 +406,7 @@ async function analyzeFrame() {
     }
     const result = await response.json();
     if (!isCurrent()) return;
-    window.WayfinderDashboard?.result(result);
+    window.SeekRDashboard?.result(result);
     addSightings(result);
     if (result.rateLimited) {
       const retryMs = Math.max(result.retryAfterMs || 30000, SCAN_INTERVAL_MS);
@@ -353,8 +422,18 @@ async function analyzeFrame() {
       return;
     }
     state.backoffUntil = 0;
+    const perceptionMeta = result.frame_meta || frameMeta;
+    if (result.perception && perceptionMeta?.stream === state.frameMeta?.stream
+      && perceptionMeta.capturedAt > (navigation?.movementAt ?? -Infinity)
+      && (!state.lastPerceptionMeta || perceptionMeta.stream !== state.lastPerceptionMeta.stream
+        || perceptionMeta.seq >= state.lastPerceptionMeta.seq)) {
+      const streamChanged = state.lastPerceptionMeta?.stream !== perceptionMeta.stream;
+      state.lastPerception = result.perception;
+      state.lastPerceptionMeta = perceptionMeta;
+      state.localRouteFrameSeq = streamChanged ? perceptionMeta.seq - 1
+        : Math.min(state.localRouteFrameSeq, perceptionMeta.seq - 1);
+    }
     applyNavigationDecision(result);
-    void maskTask.then((maskResult) => requestRouteForFrame(maskResult, result.perception, isCurrent));
     if (navigation?.pickupPending) setScanStatus('TARGET REACHED', 'NAVIGATION AND ROUTING PAUSED');
     else setScanStatus("LIVE", result.decision.action);
     console.info("Navigation response latency", {
@@ -367,11 +446,11 @@ async function analyzeFrame() {
   } catch (error) {
     if (!isCurrent()) return;
     state.backoffUntil = Date.now() + 1000;
-    window.WayfinderDashboard?.event("analysis error", { message: error.message });
+    window.SeekRDashboard?.event("analysis error", { message: error.message });
     throw error;
   } finally {
     state.analyzing = false;
-    window.WayfinderDashboard?.loop(state);
+    window.SeekRDashboard?.loop(state);
   }
 }
 async function connectCamera() {
@@ -428,7 +507,7 @@ async function startSession() {
       $("camera-placeholder")?.querySelector("span:last-child")?.replaceChildren("Allow camera access and try again.");
       $("instruction-sub").textContent = "Allow camera access before starting the scan.";
     }
-    window.WayfinderDashboard?.event("camera", { message: error.message });
+    window.SeekRDashboard?.event("camera", { message: error.message });
   }
   try {
     await analyzeFrame();
@@ -448,13 +527,9 @@ async function startSession() {
   }
   clearInterval(state.scanTimer);
   state.scanTimer = setInterval(() => {
-    if (
-      state.running &&
-      state.cameraActive &&
-      !state.listening &&
-      Date.now() >= state.backoffUntil
-    ) {
-      analyzeFrame().catch((error) => {
+    if (state.running && state.cameraActive && !state.listening) {
+      void analyzeLocalRouteFrame();
+      if (Date.now() >= state.backoffUntil) analyzeFrame().catch((error) => {
         if (error.status === 429 || error.message.includes("quota")) {
           state.running = false;
           clearInterval(state.scanTimer);
@@ -472,9 +547,26 @@ async function startSession() {
 }
 async function useTranscript(transcript) {
   state.listening = false;
+  const spokenControl = transcript.toLowerCase().trim().replace(/[.!?]+$/, '');
+  if (['exit task', 'exit the task', 'finish task', 'finish the task', 'exit session', 'finish navigation', 'exit navigation', 'im done', 'i am done'].includes(spokenControl)) {
+    const exitedTarget = targetInput.value;
+    state.running = false; state.revision++; clearInterval(state.scanTimer);
+    setTarget('');
+    $('session-state').textContent = 'Task exited';
+    setScanStatus('TASK ENDED', 'STOPPED BY VOICE');
+    setInstruction('Task exited.', exitedTarget ? `Navigation stopped for ${exitedTarget}.` : 'Navigation stopped.', null, false);
+    window.SeekRDashboard?.event('speech input', { transcript, command: 'exit task' });
+    sendToPhone({ type: 'session_state', running: false, target: '', revision: navigation?.revision ?? 0 });
+    speak(`Task exited. ${exitedTarget ? `I stopped navigation to the ${exitedTarget}. ` : ''}Name another item when you are ready.`);
+    return 'task-exited';
+  }
+  if (['resume', 'continue'].includes(spokenControl)) {
+    if (!state.running) await startSession();
+    return;
+  }
   const command = navigation?.command(transcript, phoneNow());
   if(command) {
-    window.WayfinderDashboard?.event('speech input',{transcript,command});
+    window.SeekRDashboard?.event('speech input',{transcript,command});
     if(command==='pause' && state.running) await startSession();
     if(command==='complete') {
       state.running=false; state.revision++; clearInterval(state.scanTimer);
@@ -485,10 +577,14 @@ async function useTranscript(transcript) {
     return;
   }
   const target = cleanSpokenTarget(transcript).slice(0, 100);
-  if (!target) throw new Error('No target was recognized.');
+  if (!isItemDescription(target)) {
+    setInstruction('Tell me an item to find.', 'Use an item name with optional visual details, like “red cup” or “black hoodie.”');
+    window.SeekRDashboard?.event('target rejected', { transcript, target });
+    return;
+  }
   state.listening = false;
   setTarget(target);
-  window.WayfinderDashboard?.event('speech input', { transcript, target });
+  window.SeekRDashboard?.event('speech input', { transcript, target });
   if (state.running) {
     sendToPhone({ type: 'session_state', running: true, target, revision:navigation?.revision ?? 0 });
     setInstruction('Target updated.', 'Looking for ' + target + '.');
@@ -499,6 +595,6 @@ async function useTranscript(transcript) {
     setInstruction('Waiting for phone camera.', 'Your target is ready. Allow camera access on your phone.');
   }
 }
-startButton.addEventListener('click', () => startSession().catch(error => window.WayfinderDashboard?.event('error', { message: error.message })));
+startButton.addEventListener('click', () => startSession().catch(error => window.SeekRDashboard?.event('error', { message: error.message })));
 setTarget(targetInput.value);
 renderRegistry();

@@ -36,6 +36,15 @@ def main():
     processes = []
     handles = []
     environment = os.environ.copy()
+    # Some local desktop sandboxes inject a dead loopback proxy. The Gemini
+    # client already bypasses environment proxies; Hugging Face Hub reads them
+    # directly, so strip only this known unusable endpoint for child processes.
+    for proxy_name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        if environment.get(proxy_name, "").lower() in {
+            "http://127.0.0.1:9", "https://127.0.0.1:9",
+            "http://localhost:9", "https://localhost:9",
+        }:
+            environment.pop(proxy_name, None)
     cached_hf_home = runtime / "huggingface-no-symlinks"
     if not environment.get("HF_HOME") and cached_hf_home.exists():
         environment["HF_HOME"] = str(cached_hf_home)

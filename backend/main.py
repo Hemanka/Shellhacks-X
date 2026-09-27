@@ -38,7 +38,7 @@ ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 load_dotenv(ROOT / ".env.local")
 
-app = FastAPI(title="Wayfinder Gemini API", version="0.1.0")
+app = FastAPI(title="SeekR API", version="0.1.0")
 app.include_router(pairing_router)
 GEMINI_URL_TEMPLATE = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 DEFAULT_GEMINI_MODELS = ("gemini-3.1-flash-lite", "gemini-3.5-flash-lite")

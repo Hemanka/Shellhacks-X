@@ -23,7 +23,7 @@ function tickRate(samples, now) {
   while (samples.length && samples[0] < now - 5000) samples.shift();
   return samples.length > 1 ? ((samples.length - 1) * 1000 / Math.max(1, now - samples[0])).toFixed(1) : '—';
 }
-window.WayfinderDashboard = {
+window.SeekRDashboard = {
   event: debugEvent,
   controller(snapshot) {
     debug.controller=snapshot;
@@ -140,7 +140,8 @@ async function pairPhoneCamera() {
           else phoneDisconnected();
           debugEvent('phone connection', { connected: message.connected });
         } else if (message.type === 'transcript') {
-          await useTranscript(message.text); if(navigation?.stage!=='COMPLETE') publishSession();
+          const outcome = await useTranscript(message.text);
+          if(outcome !== 'task-exited' && navigation?.stage!=='COMPLETE') publishSession();
         } else if (message.type === 'listening') {
           state.listening = message.active; state.revision++;
           debugText('mic-permission', message.active ? 'Recording / transcribing' : 'Allowed');
@@ -170,7 +171,7 @@ debugElement('clear-events').addEventListener('click', () => { debug.events = []
 debugElement('export-debug').addEventListener('click', () => {
   const blob = new Blob([JSON.stringify({ exportedAt: new Date().toISOString(), result: debug.lastResult, mask: debug.lastMask, events: debug.events, controller:debug.controller, observations:navigation?.history }, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob); const link = document.createElement('a');
-  link.href = url; link.download = 'wayfinder-debug.json'; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+  link.href = url; link.download = 'seekr-debug.json'; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
 async function checkServices() {
   try {
@@ -188,7 +189,7 @@ async function checkServices() {
   } catch (error) { debugText('server-state', 'Unavailable'); debugEvent('server error', { message: error.message }); }
 }
 setInterval(() => {
-  window.WayfinderDashboard.loop(state);
+  window.SeekRDashboard.loop(state);
   debugText('frame-age', debug.lastFrameAt ? `${((Date.now() - debug.lastFrameAt) / 1000).toFixed(1)} s` : '—');
   if (debug.lastFrameAt && Date.now() - debug.lastFrameAt > 10000) {
     debugText('camera-rate', '0');

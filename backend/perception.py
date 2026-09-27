@@ -22,6 +22,11 @@ camera-relative navigation system.
 
 Analyze the provided image. The requested navigation target is: {target!r}.
 
+The target request names one concrete item, optionally with visual attributes
+such as color, pattern, size, or material (for example, "red cup" or "black
+hoodie"). Match that item and its attributes. Do not treat rooms, landmarks,
+directions, actions, people, or abstract goals as target objects.
+
 The request names what to search for, not what is present. Never assume it exists
 in the image. A blank or featureless view must return visible=false and uncertain
 access. Identify the requested navigation target only if visibly supported. Divide the forward camera

@@ -1,5 +1,5 @@
 /* Phone audio output. Keep one unlocked player and expose fallback causes. */
-window.WayfinderSpeech = class {
+window.SeekRSpeech = class {
   constructor(report = () => {}) {
     this.report = report; this.sequence = 0; this.audio = new Audio();
     this.url = null; this.request = null; this.cache = new Map(); this.busy = false; this.ttsUnavailable = false;
@@ -13,6 +13,16 @@ window.WayfinderSpeech = class {
     this.url = null;
   }
   unlock() {
+    // Mobile browsers may require a user gesture before either audio output
+    // path can speak. Prime speech synthesis during the Allow camera tap so
+    // fallback guidance does not need a separate Hear again gesture.
+    if (window.speechSynthesis && typeof SpeechSynthesisUtterance !== 'undefined') {
+      try {
+        const utterance = new SpeechSynthesisUtterance(' ');
+        utterance.volume = 0;
+        window.speechSynthesis.speak(utterance);
+      } catch {}
+    }
     // Unlock the same HTML audio element that will play ElevenLabs responses.
     // Unlocking speechSynthesis does not unlock HTML audio on mobile browsers.
     if (this.url) { this.audio.play().catch(() => {}); return; }
@@ -32,7 +42,7 @@ window.WayfinderSpeech = class {
     this.report('fallback', reason);
     if (!window.speechSynthesis || typeof SpeechSynthesisUtterance === 'undefined') {
       this.busy = false;
-      this.report('blocked', `${reason}. Tap Hear again to retry.`);
+      this.report('blocked', `${reason}. Audio could not start automatically.`);
       return;
     }
     const utterance = new SpeechSynthesisUtterance(text); utterance.rate = 1.05;
@@ -47,11 +57,11 @@ window.WayfinderSpeech = class {
     utterance.onerror = () => {
       if (sequence !== this.sequence) return;
       this.busy = false; this.playing = false;
-      this.report('blocked', `${reason}. Tap Hear again to retry.`);
+      this.report('blocked', `${reason}. Audio could not start automatically.`);
     };
     this.busy = true;
     try { window.speechSynthesis.speak(utterance); }
-    catch { this.busy = false; this.report('blocked', `${reason}. Tap Hear again to retry.`); }
+    catch { this.busy = false; this.report('blocked', `${reason}. Audio could not start automatically.`); }
   }
   async speak(text, valid = () => true) {
     this.stop(); if (!valid()) return; this.busy = true; const sequence = this.sequence; const started = performance.now();
@@ -100,14 +110,16 @@ window.WayfinderSpeech = class {
       if (!valid()) return;
       const quotaExhausted = error.status === 429 || /credits? (?:are )?exhausted|exceeds your quota|0 credits remaining/i.test(error.message);
       const permanentFailure = error.status === 401 || /request failed \(401\)/i.test(error.message);
+      const autoplayBlocked = error.name === 'NotAllowedError';
       if (quotaExhausted || permanentFailure) this.ttsUnavailable = true;
-      const reason = quotaExhausted
+      const reason = autoplayBlocked
+        ? 'ElevenLabs playback was blocked by the browser. Using your phone’s built-in voice.'
+        : quotaExhausted
         ? 'ElevenLabs credits are exhausted. Using your phone’s built-in voice.'
         : permanentFailure ? 'ElevenLabs is unavailable for this account. Using your phone’s built-in voice.'
         : 'ElevenLabs is unavailable. Using your phone’s built-in voice.';
-      // A mobile browser may block the first delayed HTMLAudio playback even
-      // after the camera permission tap. Fall through to its speech engine so
-      // the first instruction is still heard without requiring Hear again.
+      // Browser speech synthesis can often play after HTML audio is denied,
+      // so try it immediately instead of making the user request playback again.
       if (this.url) URL.revokeObjectURL(this.url);
       this.url = null;
       this.playBrowserVoice(text, sequence, valid, reason);

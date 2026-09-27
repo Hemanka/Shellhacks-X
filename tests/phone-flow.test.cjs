@@ -24,7 +24,7 @@ function phoneHarness(modern = false) {
     window: { isSecureContext: true, MediaRecorder: true, addEventListener() {} },
     navigator: { mediaDevices: { getUserMedia: async () => { permissions++; return stream; } } },
     document: { getElementById: element, createElement: element },
-    WayfinderSpeech: class { stop() {} unlock() {} speak(text) { spoken.push(text); } },
+    SeekRSpeech: class { stop() {} unlock() {} speak(text) { spoken.push(text); } },
     WebSocket: class { static OPEN = 1; readyState = 1; bufferedAmount = 0;
       constructor() { socket = this; } send(text) { sent.push(JSON.parse(text)); } close() {} },
     MediaStream: class {},

@@ -14,7 +14,7 @@ function harness() {
     fetch: async () => { requests++; return { ok: controls.status === 200, status: controls.status, blob: async () => new Blob(['audio']) }; },
   };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../frontend/speech.js'), 'utf8'), context);
-  return { speech: new context.window.WayfinderSpeech((...report) => reports.push(report)), reports, fallback, players, controls, requests: () => requests };
+  return { speech: new context.window.SeekRSpeech((...report) => reports.push(report)), reports, fallback, players, controls, requests: () => requests };
 }
 test('ElevenLabs clips reuse the player and cache repeated instructions', async () => {
   const h = harness(); h.speech.unlock();

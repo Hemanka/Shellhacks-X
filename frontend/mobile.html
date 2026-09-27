@@ -2,23 +2,22 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#122c29"><title>Wayfinder · Phone</title>
+  <meta name="theme-color" content="#122c29"><title>SeekR · Phone</title>
   <link rel="stylesheet" href="/mobile.css">
 </head>
 <body>
   <main>
-    <p class="brand">WAYFINDER</p><h1>Find what<br>you need.</h1>
+    <p class="brand">SeekR</p><h1>Find what<br>you need.</h1>
     <p id="status" role="status">Connect your camera to begin.</p>
-    <button id="allow-permissions" class="primary">Allow camera</button>
-    <section aria-label="Voice input">
-      <p class="label">SAY WHAT YOU WANT TO FIND OR ANSWER</p>
-      <button id="voice-command" class="primary" disabled aria-pressed="false">Start speaking</button>
-      <p id="voice-status" role="status" aria-live="polite">Connect and allow microphone access to speak.</p>
+    <button id="allow-permissions" class="primary">Start SeekR</button>
+    <section id="voice-navigation" aria-label="Voice navigation">
+      <p class="label">VOICE NAVIGATION</p>
+      <p id="voice-status" role="status" aria-live="polite">One tap turns on the camera and microphone. Then say the item you want, like “red cup” or “black hoodie.”</p>
+      <p class="label">YOUR NEXT STEP</p><p id="spoken-output" aria-live="polite">Waiting for your request.</p>
     </section>
-    <section aria-label="Spoken guidance">
-      <p class="label">YOUR NEXT STEP</p><p id="spoken-output" aria-live="off">Waiting for your request.</p>
-      <button id="repeat-guidance" disabled>Hear again</button>
-      <button id="pause-guidance" disabled>Pause guidance</button>
+    <section id="target-section" aria-label="Current target" hidden>
+      <p class="label">TARGET</p>
+      <p id="target-value">Waiting for an item</p>
     </section>
     <video id="phone-video" class="capture-video" autoplay muted playsinline aria-hidden="true" tabindex="-1"></video>
   </main>

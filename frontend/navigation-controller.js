@@ -106,19 +106,6 @@
       }
       const failed = ['fallback','demo','insufficient_image'].includes(result.source) || result.rateLimited;
       const visible = !failed && t.visible && t.confidence >= this.config.confidence;
-      if (this.config.routeMode && this.awaitingExtraStep && visible
-        && this.extraApproachBaseline && meta.capturedAt > this.extraApproachBaseline.at
-        && Array.isArray(t.bbox) && Array.isArray(this.extraApproachBaseline.bbox)) {
-        const box = t.bbox, before = this.extraApproachBaseline.bbox;
-        const area = Math.max(0, box[2]-box[0]) * Math.max(0, box[3]-box[1]);
-        const beforeArea = Math.max(0, before[2]-before[0]) * Math.max(0, before[3]-before[1]);
-        const movedCloser = (beforeArea > 0 && area >= beforeArea * 1.12)
-          || box[3] >= before[3] + .025;
-        if (movedCloser) {
-          this.awaitingExtraStep = false; this.extraApproachMoved = true;
-          this.reason = 'Final step observed'; this.snapshot({finalStepObserved:true});
-        }
-      }
       // Delayed sightings can orient a stationary search, never authorize a step.
       if (visible && meta.orientation?.valid && now >= meta.capturedAt && now-meta.capturedAt <= this.config.memoryMs) {
         this.memory = {stream:meta.stream, at:meta.capturedAt, heading:meta.orientation.heading,
@@ -146,13 +133,19 @@
         if (this.reachRejected && this.reachRetryAfter !== null && meta.capturedAt > this.reachRetryAfter) { this.reachRejected=false; this.reachRetryAfter=null; }
         const ready = !this.reachRejected && t.pickupSuitable && access.reachability === 'easily_reachable' && access.reach === 'clear' && access.evidence && !blockedReach;
         if(access.reachability === 'needs_approach') this.reachRejected = false;
+        const postFinalStepCheck = this.awaitingExtraStep && this.extraApproachUsed
+          && this.extraApproachBaseline && meta.capturedAt > this.extraApproachBaseline.at
+          && ready;
+        if (postFinalStepCheck) {
+          this.awaitingExtraStep = false; this.extraApproachMoved = true;
+          this.reason = 'Final step confirmed within reach';
+          this.snapshot({finalStepObserved:true});
+        }
         this.reachCount = ready && (!this.awaitingExtraStep || this.extraApproachMoved) ? this.reachCount+1 : 0;
-        const centered = t.direction === 'CENTER' && Array.isArray(t.bbox)
-          && Math.abs((t.bbox[0] + t.bbox[2]) / 2 - 0.5) <= 0.10;
-        if (this.reachCount >= 2 && this.extraApproachUsed && this.extraApproachMoved && centered) {
+        if (this.reachCount >= 1 && this.extraApproachUsed && this.extraApproachMoved) {
           this.pickupPending = true;
           const support = (p.obstacles || []).find(o => o.relationship === 'target_support');
-          return this.cue('PICKUP', `I think you are at the ${t.label || this.target}${support?.label ? `, on the ${support.label}` : ''}. Please reach out carefully in front of you and feel for it. Can you touch it? Say yes if you can, or no if you cannot find it.`, 'pickup', now, meta, 2, true);
+          return this.cue('PICKUP', `You have reached the ${t.label || this.target}${support?.label ? `, on the ${support.label}` : ''}. Stop here and reach out carefully in front of you. Can you feel it? Say yes to confirm, or no if you cannot find it.`, 'pickup', now, meta, 2, true);
         }
         if (this.reachCount >= 2 && !this.extraApproachUsed) {
           this.extraApproachPending = true;
@@ -162,7 +155,10 @@
           return this.cue('HOLD', blockedReach ? `Stay here. ${blockedReach.label || 'An obstacle'} is between you and the item.` : 'The item appears comfortably within reach. Stay here while I confirm, or say too far if you need to move closer.', 'check-reach', now);
         }
         if (this.activeRoute) return;
-        return this.cue('HOLD', `I found the ${t.label || this.target}. Hold still while I build the floor mask and route.`, 'target-found-route-pending', now, meta);
+        this.stage = 'HOLD'; this.reason = 'target-found-route-pending';
+        this.snapshot({instruction:`I found the ${t.label || this.target}. Checking the clear path.`,
+          evidenceFrame:meta.seq, evidenceAge:now-meta.capturedAt});
+        return;
       }
       const obstacles = p.obstacles || [];
       const hazards = obstacles.filter(o => o.confidence >= this.config.confidence && o.proximity === 'appears_close' && o.proximityConfidence >= .85
@@ -204,7 +200,7 @@
         this.pickupPending = true;
         const support = obstacles.find(o => o.relationship === 'target_support' && o.confidence >= this.config.confidence);
         const surface = support?.label ? `on the ${support.label}` : ['floor','table','shelf'].includes(t.support) ? `on the ${t.support}` : 'nearby';
-        return this.cue('PICKUP',`Stop. You have arrived at the ${t.label || this.target}, ${surface} ${sideText(t.direction)}. Reach out and pick it up. Say got it when it is in your hand.`,
+        return this.cue('PICKUP',`You have reached the ${t.label || this.target}, ${surface} ${sideText(t.direction)}. Stop here and reach out carefully. Say yes to confirm you can feel it, or no if you cannot find it.`,
           'pickup',now,meta,2,true);
       }
       if (this.pickupPending) return this.cue('HOLD','Stay here. I need a clearer view of the item and the space around it.','pickup-uncertain',now);
@@ -239,14 +235,18 @@
       if (output) this.invalidate('Walking instruction issued');
       return output;
     }
-    observeRoute(result, meta, now, orientation) {
+    observeRoute(result, meta, now, orientation, perceptionOverride = null, perceptionMeta = null) {
       if (this.stage === 'COMPLETE' || this.pickupPending) return;
       if (!this.config.routeMode || !meta || this.stage === 'COMPLETE' || this.pickupPending) return;
       if (this.routeStream === meta.stream && meta.seq <= this.routeSeq) return;
       this.routeStream = meta.stream; this.routeSeq = meta.seq;
       if (meta.capturedAt <= this.movementAt || meta.capturedAt > now) return;
-      const scene = [...this.history].reverse().find(item =>
-        item.meta.stream === meta.stream && item.meta.seq === meta.seq);
+      const scene = perceptionOverride && perceptionMeta?.stream === meta.stream
+        && meta.capturedAt >= perceptionMeta.capturedAt
+        && meta.capturedAt - perceptionMeta.capturedAt <= 5000
+        ? {meta:perceptionMeta, perception:perceptionOverride}
+        : [...this.history].reverse().find(item =>
+          item.meta.stream === meta.stream && item.meta.seq === meta.seq);
       if (!scene) return;
       const p = scene.perception;
       const t = p.target, access = p.access || {};

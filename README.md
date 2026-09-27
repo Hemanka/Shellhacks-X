@@ -1,22 +1,31 @@
-# Wayfinder
+# SeekR
 
 A voice-first blind navigation assistant prototype. The phone handles camera and microphone permissions, voice input, and spoken output. The Windows browser dashboard runs the navigation loop and shows diagnostics.
 
 ## Start on Windows
 
-Double-click **Start-Wayfinder.cmd** to open the local dashboard in the default
-Windows browser. For phone use, **Start-Wayfinder-Phone.cmd** starts the same
-dashboard plus a temporary public Cloudflare HTTPS tunnel. This shares the app
-through Cloudflare so the phone can access its camera and microphone securely.
-The dashboard creates its QR code automatically. Keep the launcher running.
+Double-click **Start-SeekR.cmd** to open the dashboard and start a temporary
+Cloudflare HTTPS tunnel. The dashboard remains at `http://127.0.0.1:8000`; the
+QR code uses the tunnel's HTTPS address so phone camera and microphone
+permissions work. **Start-SeekR-Phone.cmd** does the same. The phone address
+is randomly assigned and changes when the tunnel restarts. Keep the launcher
+running while using the phone. The tunnel makes this app reachable through a
+public HTTPS URL for that session; do not share the QR code with people you do
+not want accessing the session.
 
-Scan the QR code, tap **Allow camera & microphone** on the phone, and then tap
-**Tap to speak**. The phone has no camera preview, map, model output, or debug
-panels. Instructions play on the phone; the Windows dashboard stays silent.
+Scan the QR code and tap **Start SeekR** once on the phone to allow camera and
+microphone access. Keep the page open while using it. Say an item target such
+as “red cup” or “black hoodie”; later, say “Hey SeekR” before a new target or
+control command. Answer a spoken question directly. The phone has no camera
+preview, map, model output, or debug panels. Instructions play on the phone;
+the Windows dashboard stays silent.
 
-Double-click **Stop-Wayfinder.cmd** to stop the server and tunnel. For an existing
-HTTPS endpoint, use `./Start-Wayfinder.ps1 -PhoneUrl https://your-host.example`.
-The optional HTTPS field on the dashboard can also regenerate the QR link.
+Double-click **Stop-SeekR.cmd** to stop the server and tunnel. To run local
+debug mode without a phone tunnel, use `./Start-SeekR.ps1 -NoTunnel`. For an
+existing HTTPS endpoint, use `./Start-SeekR.ps1 -PhoneUrl https://your-host.example`.
+The optional HTTPS field on the dashboard can also regenerate the QR link. A
+stable branded HTTPS address requires a domain and a configured Cloudflare
+tunnel; the automatic quick tunnel provides a temporary address instead.
 
 The launcher installs the small dashboard dependencies from
 `requirements-web.txt`. Add your API keys to `.env` or `.env.local` before live use. To enable
@@ -104,15 +113,19 @@ Legacy `PAIR_HOST`, `PAIR_SCHEME`, and `PAIR_PORT` remain supported. The PC and
 phone must both be able to reach the generated address.
 ## ElevenLabs text to speech
 
-Set `ELEVENLABS_API_KEY` in `.env` to have every live guidance instruction spoken with ElevenLabs. The browser calls the local `/api/speech` endpoint, so the secret key remains on the backend. You can optionally set `ELEVENLABS_VOICE_ID` and `ELEVENLABS_MODEL_ID`; the defaults use the George voice and the low-latency `eleven_flash_v2_5` model. If ElevenLabs is unavailable or not configured, Wayfinder automatically falls back to the browser's built-in speech synthesis so guidance remains audible.
+Set `ELEVENLABS_API_KEY` in `.env` to have every live guidance instruction spoken with ElevenLabs. The browser calls the local `/api/speech` endpoint, so the secret key remains on the backend. You can optionally set `ELEVENLABS_VOICE_ID` and `ELEVENLABS_MODEL_ID`; the defaults use the George voice and the low-latency `eleven_flash_v2_5` model. If ElevenLabs is unavailable or not configured, SeekR automatically falls back to the browser's built-in speech synthesis so guidance remains audible.
 
 ## Voice target selection
 
-On the phone, tap **Tap to speak**, say “help me find my keys,” then tap again to
-finish. Wayfinder records up to eight seconds, transcribes with ElevenLabs
-Scribe v2, sends the transcript to the dashboard, and starts navigation. The API
-key remains on the backend. The dashboard also has a manual target field for
-debugging when voice input is unavailable.
+On the phone, tap **Start SeekR** once, then say “red cup” or “black hoodie.”
+After that first target, say “Hey SeekR” before giving a new target. The phone
+keeps hands-free speech recognition active and sends matching
+wake-word commands or answers to spoken prompts to the dashboard. Browsers
+without built-in speech recognition use voice activity detection and the
+backend’s ElevenLabs Scribe transcription endpoint. Keep the phone page in the
+foreground; mobile browsers may suspend microphone recognition when the page is
+backgrounded or the screen is locked. The dashboard also has a manual target
+field for debugging when voice input is unavailable.
 
 ## Phase 1 candidate traversability mask
 
@@ -162,8 +175,10 @@ shared cross-session target history.
   floor stays occupied space but can lead to pickup instead of a detour.
 - Two usable reach assessments, confidence >= 0.8, clear reach evidence, and a
   pickup-suitable target enable coarse pickup cues. A visible hand is optional.
-- Say **got it**, **can't reach it**, **lost it**, **repeat**, **pause**, or **find …**.
-  Continue using Tap to speak; this is not continuous voice recognition.
+- Say “Hey SeekR” before a new target or control command. Say “exit task” to
+  stop navigation. Answers to spoken
+  questions (such as “yes,” “no,” “too far,” or “got it”) are accepted directly.
+  Say “pause,” “resume,” or “repeat” by voice.
 
 ### Recovery and phone sensors
 
@@ -223,5 +238,5 @@ Supported targets use a general approach-stop-reach sequence: distant target sup
 Incremental guidance update: model results and modern speech cues no longer expire solely with elapsed time. Each movement cue establishes a capture boundary; the next movement needs a frame captured after it. Duplicate/out-of-order frames and results invalidated by a substantial comparable heading change (25 degrees) are rejected. Pause, target changes and disconnection still cancel guidance. The ten-second camera-delivery watchdog is separate from result validity. Orientation-memory age limits remain for recovery only. No step-completion or translation detector is implemented; the user follows the take-one-step-then-pause workflow.
 
 ### NVIDIA-driven approach
-The dashboard enables routeMode: local pixel masks supply the walking/turning choice independently of Gemini. The overlay preserves the segmenter's per-pixel contours instead of painting rectangular detector boxes over the floor. A 96x128 planning grid follows those contours with round clearance buffers; unknown cells carry a higher cost, while classified obstacles remain closed. Mask inference runs alongside Gemini, and route planning uses the target location from the same frame as its cached mask. The yellow line is solid for a confirmed route and dashed for an estimate. The phone keeps the current instruction while ordinary frames arrive; it speaks a replacement only when the mask changes substantially, the route moves substantially, or the immediate action changes. Gemini supplies target identity/location and pickup/reach context, and ElevenLabs speaks each route instruction on the paired phone. These image-space routes do not measure body clearance, distance, drop-offs, or overhead hazards; physical room trials remain necessary.
-Reach handoff: likely_reachable does not qualify for pickup or stop NVIDIA; easily_reachable with a comfortable grasp and no stepping, leaning or stretching is required. A reach-check pause requires pickup suitability, clear reach, evidence and no separate reach obstruction. In route mode, two consistent easy-reach observations trigger one final short, mask-guided step; two fresh centered observations afterward can trigger the explicit arrival and pickup prompt. Say too far or cannot reach it to request another mask-guided approach step before rechecking reach. The correction never bypasses a blocked floor route.
+The dashboard enables routeMode: local pixel masks supply the walking/turning choice independently of Gemini. The overlay preserves the segmenter's per-pixel contours instead of painting rectangular detector boxes over the floor. A 96x128 planning grid follows those contours with round clearance buffers; unknown cells carry a higher cost, while classified obstacles remain closed. Mask and route updates run independently at up to four frames per second. They use the most recent Gemini-confirmed target location, but stop when that location is over five seconds old or the phone has turned substantially; step cues no longer wait for a new Gemini response. The yellow line is solid for a confirmed route and dashed for an estimate. The phone speaks a replacement only when the mask changes substantially, the route moves substantially, or the immediate action changes. Gemini continues to supply target identity/location and pickup/reach context, and ElevenLabs speaks each route instruction on the paired phone. These image-space routes do not measure body clearance, distance, drop-offs, or overhead hazards; physical room trials remain necessary.
+Reach handoff: likely_reachable does not qualify for pickup or stop NVIDIA; easily_reachable with a comfortable grasp and no stepping, leaning or stretching is required. A reach-check pause requires pickup suitability, clear reach, evidence and no separate reach obstruction. In route mode, two consistent easy-reach observations trigger one final short, mask-guided step; the first fresh clear easy-reach observation after that step announces arrival and asks for voice confirmation. Say too far or cannot reach it to request another mask-guided approach step before rechecking reach. The correction never bypasses a blocked floor route.
