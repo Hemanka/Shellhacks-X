@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from threading import RLock
 from time import perf_counter
 
 import numpy as np
@@ -16,6 +17,11 @@ class SegformerTraversabilitySegmenter:
         self._processor = None
         self._model = None
         self._device = None
+        self._inference_lock = RLock()
+
+    @property
+    def device_name(self) -> str | None:
+        return str(self._device) if self._device is not None else None
 
     def _load(self) -> None:
         if self._model is not None:
@@ -45,7 +51,16 @@ class SegformerTraversabilitySegmenter:
         self._model.eval()
         self._device = device
 
+    def warmup(self) -> None:
+        """Load model weights and run one disposable inference before navigation."""
+        with self._inference_lock:
+            self._segment_unlocked(Image.new("RGB", (512, 512), (127, 127, 127)))
+
     def segment(self, image: Image.Image) -> TraversabilityMask:
+        with self._inference_lock:
+            return self._segment_unlocked(image)
+
+    def _segment_unlocked(self, image: Image.Image) -> TraversabilityMask:
         import torch
         import torch.nn.functional as functional
 

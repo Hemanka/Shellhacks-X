@@ -1,7 +1,7 @@
 // Start at most four analyses per second; slow requests never accumulate.
 const SCAN_INTERVAL_MS = 250;
 const SCAN_POLL_MS = 50;
-const MASK_INTERVAL_MS = 1000;
+const MASK_INTERVAL_MS = 500;
 
 const state = {
   running: false,
@@ -52,6 +52,7 @@ const navigation = window.NavigationController ? new window.NavigationController
   if (!state.running || state.listening) return;
   if(cue.type==='cancel_hazard') { sendToPhone(cue); return; }
   setInstruction(cue.text, `${cue.stage} · ${cue.source}`, null, false);
+  if (cue.type === 'PICKUP') setScanStatus('TARGET REACHED', 'NAVIGATION AND ROUTING PAUSED');
   sendToPhone({...cue,stream:state.frameMeta?.stream});
   window.WayfinderDashboard?.event('speech output',cue);
 }, snapshot=>window.WayfinderDashboard?.controller?.(snapshot), {routeMode:true}) : null;
@@ -219,10 +220,10 @@ function applyNavigationDecision(result) {
 
 // The diagnostic mask must never delay guidance or queue more inference work.
 function updateTraversability(requestBody, isCurrent) {
-  if (state.maskAnalyzing || Date.now() < state.nextMaskAt) return;
+  if (state.maskAnalyzing || Date.now() < state.nextMaskAt) return Promise.resolve(null);
   state.maskAnalyzing = true;
   state.nextMaskAt = Date.now() + MASK_INTERVAL_MS;
-  fetch("/api/traversability-frame", {
+  return fetch("/api/traversability-frame", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(requestBody),
@@ -235,18 +236,42 @@ function updateTraversability(requestBody, isCurrent) {
       }
       return response.json();
     })
-    .then((result) => { if (isCurrent()) { renderTraversability(result); window.WayfinderDashboard?.mask(result); if (state.running && !state.listening) navigation?.observeRoute(result, result.frame_meta, phoneNow(), state.orientation); } })
+    .then((result) => { if (isCurrent()) { renderTraversability(result); window.WayfinderDashboard?.mask(result); return result; } return null; })
     .catch((error) => {
       state.nextMaskAt = Date.now() + 10000;
       if (isCurrent()) $("traversability-readout").textContent = "MASK UNAVAILABLE";
       window.WayfinderDashboard?.event("mask error", { message: error.message });
       console.warn("Traversability overlay unavailable.", error);
+      return null;
     })
     .finally(() => { state.maskAnalyzing = false; });
 }
 
+async function requestRouteForFrame(maskResult, perception, isCurrent) {
+  if (!maskResult?.frame_meta || !isCurrent() || navigation?.pickupPending) return;
+  try {
+    const response = await fetch("/api/traversability-route", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ frame_meta: maskResult.frame_meta, perception }),
+    });
+    if (!response.ok) {
+      let detail = '';
+      try { detail = (await response.json()).detail || ''; } catch {}
+      throw new Error(`Route service returned ${response.status}${detail ? `: ${detail}` : ''}`);
+    }
+    const result = await response.json();
+    if (isCurrent() && state.running && !state.listening) {
+      navigation?.observeRoute(result, result.frame_meta, phoneNow(), state.orientation);
+    }
+  } catch (error) {
+    if (isCurrent()) window.WayfinderDashboard?.event("route error", { message: error.message });
+    console.warn("Matching-frame route plan unavailable.", error);
+  }
+}
+
 async function analyzeFrame() {
-  if (state.analyzing || !state.running || state.listening ||
+  if (state.analyzing || !state.running || state.listening || navigation?.pickupPending ||
       Date.now() < Math.max(state.backoffUntil, state.nextScanAt || 0)) return;
   if (state.remoteFrame && (state.remoteFrameId === state.analyzedRemoteFrameId ||
       Date.now() - state.remoteFrameAt > 2000)) return;
@@ -259,7 +284,7 @@ async function analyzeFrame() {
   const revision = state.revision;
   const target = targetInput.value;
   const isCurrent = () => state.running && !state.listening &&
-    state.revision === revision && targetInput.value === target;
+    state.revision === revision && targetInput.value === target && !navigation?.pickupPending;
   state.nextScanAt = Date.now() + SCAN_INTERVAL_MS;
   const captureStarted = performance.now();
   try {
@@ -291,9 +316,9 @@ async function analyzeFrame() {
       capture_ms: captureMs,
       frame_meta: frameMeta,
     };
-    // Use the same decoded, normalized JPEG for Gemini and segmentation.
-    // The raw phone data URL can be rejected by Pillow even when browsers decode it.
-    updateTraversability(requestBody, isCurrent);
+    // Start local segmentation while Gemini analyzes this identical JPEG.
+    // The route request waits for both and then reuses the cached exact-frame mask.
+    const maskTask = updateTraversability(requestBody, isCurrent);
     const response = await fetch("/api/analyze-frame", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -329,7 +354,9 @@ async function analyzeFrame() {
     }
     state.backoffUntil = 0;
     applyNavigationDecision(result);
-    setScanStatus("LIVE", result.decision.action);
+    void maskTask.then((maskResult) => requestRouteForFrame(maskResult, result.perception, isCurrent));
+    if (navigation?.pickupPending) setScanStatus('TARGET REACHED', 'NAVIGATION AND ROUTING PAUSED');
+    else setScanStatus("LIVE", result.decision.action);
     console.info("Navigation response latency", {
       responseMs: Math.round(performance.now() - captureStarted),
       nextRequestInMs: Math.max(0, state.nextScanAt - Date.now()),
@@ -386,8 +413,8 @@ async function startSession() {
     state.timer = setInterval(updateClock, 1000);
   }
   setInstruction(
-    "Stay in place and slowly pan your phone to scan the room.",
-    `Looking for your ${targetInput.value}.`,
+    "Hold still while I check this view.",
+    `I'll check this view for your ${targetInput.value}.`,
   );
   try {
     await connectCamera();

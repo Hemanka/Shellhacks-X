@@ -2,7 +2,7 @@
 window.WayfinderSpeech = class {
   constructor(report = () => {}) {
     this.report = report; this.sequence = 0; this.audio = new Audio();
-    this.url = null; this.request = null; this.cache = new Map(); this.busy = false;
+    this.url = null; this.request = null; this.cache = new Map(); this.busy = false; this.ttsUnavailable = false;
   }
   stop() {
     this.sequence++; this.busy = false; this.playing = false;
@@ -28,8 +28,37 @@ window.WayfinderSpeech = class {
     this.audio.src = silentUrl;
     this.audio.play().catch(() => {}).finally(() => URL.revokeObjectURL(silentUrl));
   }
+  playBrowserVoice(text, sequence, valid, reason) {
+    this.report('fallback', reason);
+    if (!window.speechSynthesis || typeof SpeechSynthesisUtterance === 'undefined') {
+      this.busy = false;
+      this.report('blocked', `${reason}. Tap Hear again to retry.`);
+      return;
+    }
+    const utterance = new SpeechSynthesisUtterance(text); utterance.rate = 1.05;
+    utterance.onstart = () => {
+      if (sequence !== this.sequence || !valid()) return;
+      this.playing = true; this.report('playing', 'Using your phone’s built-in voice');
+    };
+    utterance.onend = () => {
+      if (sequence !== this.sequence) return;
+      this.busy = false; this.playing = false; this.report('idle', 'Phone voice finished');
+    };
+    utterance.onerror = () => {
+      if (sequence !== this.sequence) return;
+      this.busy = false; this.playing = false;
+      this.report('blocked', `${reason}. Tap Hear again to retry.`);
+    };
+    this.busy = true;
+    try { window.speechSynthesis.speak(utterance); }
+    catch { this.busy = false; this.report('blocked', `${reason}. Tap Hear again to retry.`); }
+  }
   async speak(text, valid = () => true) {
     this.stop(); if (!valid()) return; this.busy = true; const sequence = this.sequence; const started = performance.now();
+    if (this.ttsUnavailable) {
+      this.playBrowserVoice(text, sequence, valid, 'ElevenLabs credits are exhausted. Using your phone’s built-in voice.');
+      return;
+    }
     this.request = new AbortController();
     this.report('requesting', 'Preparing ElevenLabs guidance');
     let phase = 'request';
@@ -43,7 +72,9 @@ window.WayfinderSpeech = class {
         if (!response.ok) {
           let detail = '';
           try { detail = (await response.json()).detail || ''; } catch {}
-          throw new Error(`Speech service returned HTTP ${response.status}${detail ? `: ${detail}` : ''}`);
+          const error = new Error(`Speech service returned HTTP ${response.status}${detail ? `: ${detail}` : ''}`);
+          error.status = response.status;
+          throw error;
         }
         blob = await response.blob();
         if (sequence !== this.sequence) return;
@@ -67,24 +98,19 @@ window.WayfinderSpeech = class {
       if (sequence !== this.sequence || error.name === 'AbortError') return;
       this.busy = false;
       if (!valid()) return;
-      const reason = `ElevenLabs ${phase}: ${error.name || 'Error'} — ${error.message}`;
-      if (error.name === 'NotAllowedError') {
-        this.report('blocked', `${reason}. Tap Hear again to enable ElevenLabs audio.`);
-        return;
-      }
+      const quotaExhausted = error.status === 429 || /credits? (?:are )?exhausted|exceeds your quota|0 credits remaining/i.test(error.message);
+      const permanentFailure = error.status === 401 || /request failed \(401\)/i.test(error.message);
+      if (quotaExhausted || permanentFailure) this.ttsUnavailable = true;
+      const reason = quotaExhausted
+        ? 'ElevenLabs credits are exhausted. Using your phone’s built-in voice.'
+        : permanentFailure ? 'ElevenLabs is unavailable for this account. Using your phone’s built-in voice.'
+        : 'ElevenLabs is unavailable. Using your phone’s built-in voice.';
+      // A mobile browser may block the first delayed HTMLAudio playback even
+      // after the camera permission tap. Fall through to its speech engine so
+      // the first instruction is still heard without requiring Hear again.
       if (this.url) URL.revokeObjectURL(this.url);
       this.url = null;
-      this.report('fallback', reason);
-      if (!window.speechSynthesis) { this.report('blocked', reason); return; }
-      // Retain emergency speech when the service/network/decoder is unavailable.
-      const utterance = new SpeechSynthesisUtterance(text); utterance.rate = 1.05;
-      utterance.onstart = () => { if (sequence === this.sequence) this.report('playing', `Browser voice fallback · ${reason}`); };
-      utterance.onend = () => { if (sequence === this.sequence) this.report('idle', 'Browser fallback finished'); };
-      utterance.onerror = () => { if (sequence === this.sequence) this.report('blocked', `${reason}. Browser voice also failed.`); };
-      this.busy = true;
-      const ended = utterance.onend; utterance.onend = () => { if(sequence===this.sequence) {this.busy = false; this.playing=false;} ended(); };
-      const failed = utterance.onerror; utterance.onerror = () => { if(sequence===this.sequence) {this.busy = false; this.playing=false;} failed(); };
-      window.speechSynthesis.speak(utterance);
+      this.playBrowserVoice(text, sequence, valid, reason);
     }
   }
 };

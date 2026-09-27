@@ -32,7 +32,8 @@ window.WayfinderDashboard = {
       if(overlay) {
         const w=snapshot.routeWidth || 640,h=snapshot.routeHeight || 480;
         const points=(snapshot.selectedRoute?.points || []).map(([x,y])=>`${x*w},${y*h}`).join(' ');
-        overlay.src='data:image/svg+xml,'+encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}"><polyline points="${points}" fill="none" stroke="#fff176" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/></svg>`);
+        const estimate=snapshot.selectedRoute?.certainty==='estimated';
+        overlay.src='data:image/svg+xml,'+encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}"><polyline points="${points}" fill="none" stroke="#fff176" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" ${estimate?'stroke-dasharray="8 8"':''}/></svg>`);
       }
     }
     debugText('controller-summary',`${snapshot.stage} · ${snapshot.reason}`);
@@ -61,7 +62,7 @@ window.WayfinderDashboard = {
   },
   mask(result) {
     debug.lastMask = { ...result, overlayDataUrl: '[image omitted]' };
-    debugText('mask-ms', `${Math.round(result.totalMs)} ms`);
+    debugText('mask-ms', `${Math.round(result.totalMs)} ms total · ${Math.round(result.inferenceMs || 0)} ms inference`);
     debugText('raw-mask', JSON.stringify(debug.lastMask, null, 2));
   },
   loop(current) {
@@ -149,7 +150,8 @@ async function pairPhoneCamera() {
           if (message.microphone) debugText('mic-permission', message.microphone);
             if (message.speech) debugText('speech-state', message.speech);
             if (message.haptics || message.orientation) debugText('feedback-state',message.haptics || message.orientation);
-            if (message.speech === 'fallback' || message.speech === 'blocked') debugEvent('speech error', { detail: message.detail });
+            if (message.speech === 'fallback') debugEvent('speech fallback', { detail: message.detail });
+            if (message.speech === 'blocked') debugEvent('speech error', { detail: message.detail });
           debugEvent('phone status', message);
         } else if (message.type === 'control') {
           if ((message.action === 'pause' && state.running) || (message.action === 'resume' && !state.running)) await startSession();
@@ -177,6 +179,12 @@ async function checkServices() {
     debugText('gemini-state', health.gemini_configured ? 'Configured' : 'API key missing');
     debugText('elevenlabs-state', health.elevenlabs_configured ? 'Configured' : 'API key missing');
     debugText('server-state', health.demo_mode ? 'Demo mode' : 'Connected');
+    const mask = health.mask_model || {};
+    if (!debug.lastMask) {
+      const warmup = Number.isFinite(mask.durationMs) ? ` · ${Math.round(mask.durationMs)} ms warm-up` : '';
+      debugText('traversability-readout', mask.state === 'ready' ? `MASK MODEL READY${warmup}`
+        : mask.state === 'unavailable' ? 'MASK MODEL UNAVAILABLE' : 'MASK MODEL WARMING');
+    }
   } catch (error) { debugText('server-state', 'Unavailable'); debugEvent('server error', { message: error.message }); }
 }
 setInterval(() => {
@@ -194,4 +202,21 @@ setInterval(() => {
   if (debug.resultTimes.length && Date.now() - debug.resultTimes.at(-1) > 5000) debugText('analysis-rate', '0');
 }, 500);
 checkServices(); setInterval(checkServices, 15000);
+let maskStatusInterval = setInterval(async () => {
+  try {
+    const response = await fetch('/api/health');
+    if (!response.ok) return;
+    const health = await response.json();
+    const mask = health.mask_model || {};
+    if (!debug.lastMask) {
+      const warmup = Number.isFinite(mask.durationMs) ? ` · ${Math.round(mask.durationMs)} ms warm-up` : '';
+      debugText('traversability-readout', mask.state === 'ready' ? `MASK MODEL READY${warmup}`
+        : mask.state === 'unavailable' ? 'MASK MODEL UNAVAILABLE' : 'MASK MODEL WARMING');
+    }
+    if (mask.state === 'ready' || mask.state === 'unavailable') {
+      clearInterval(maskStatusInterval);
+      maskStatusInterval = null;
+    }
+  } catch {}
+}, 1000);
 pairPhoneCamera().catch(error => debugEvent('pairing error', { message: error.message }));

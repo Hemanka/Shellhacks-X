@@ -8,6 +8,7 @@ function harness() {
   const scene=(patch={})=>({source:'gemini',decision:{action:'HOLD'},perception:{
     target:{visible:true,label:'bottle',direction:'CENTER',confidence:.95,bbox:[.4,.4,.6,.8],support:'floor',pickupSuitable:true},
     access:{approach:'clear',reach:'clear',reachability:'needs_approach',evidence:'Floor before item is visible'},
+    sceneConfidence:.95,
     sectors:{left:{status:'OPEN',confidence:.95},center:{status:'BLOCKED',confidence:.95},right:{status:'OPEN',confidence:.95}},obstacles:[],...patch}});
   function observe(patch={},age=100,heading=0) {const meta={stream:'s',seq:++seq,capturedAt:now-age,orientation:{...orientation(heading),at:now-age}};const r=scene(patch);c.observe(r,meta,now,orientation(heading));return {r,meta};}
   return {c,outputs,scene,observe,orientation,advance(ms){now+=ms;},now:()=>now,last:()=>outputs.at(-1)};
@@ -21,7 +22,7 @@ test('two consistent offsets needed and borderline jitter stays quiet',()=>{
   h.observe({target:{...h.scene().perception.target,bbox:[.82,.4,.98,.8]}});assert.equal(h.last().key,'align:right');
 });
 test('duplicate and stale frames never authorize additional physical action',()=>{const h=harness();const {r,meta}=h.observe();const n=h.outputs.length;h.c.observe(r,meta,h.now(),h.orientation());assert.equal(h.outputs.length,n);h.advance(5000);h.observe({},11000);assert.equal(h.last().physical,false);assert.equal(h.last().stage,'HOLD');});
-test('two fresh reach assessments enter pickup without hand fields',()=>{const h=harness();const access={approach:'clear',reach:'clear',reachability:'easily_reachable',evidence:'Floor and item reachable from current view'};h.observe({access});assert.notEqual(h.last().stage,'PICKUP');h.advance(500);h.observe({access});assert.equal(h.last().stage,'PICKUP');assert.match(h.last().text,/floor/);assert.equal(h.c.command('got it',h.now()),'complete');});
+test('legacy pickup instruction tells user to grab the target and confirms arrival',()=>{const h=harness();const access={approach:'clear',reach:'clear',reachability:'easily_reachable',evidence:'Floor and item reachable from current view'};h.observe({access});assert.notEqual(h.last().stage,'PICKUP');h.advance(500);h.observe({access});assert.equal(h.last().stage,'PICKUP');assert.match(h.last().text,/arrived.*reach out and pick it up/i);assert.equal(h.c.command('got it',h.now()),'complete');assert.match(h.last().text,/pickup confirmed.*arrived/i);});
 test('target hazard warns then transitions to pickup rather than looping stop',()=>{const h=harness();const p={access:{approach:'clear',reach:'clear',reachability:'easily_reachable',evidence:'Reach area visible'},obstacles:[close('target_itself','bottle')]};h.observe(p);assert.equal(h.last().type,'hazard');h.advance(500);h.observe(p);assert.equal(h.last().stage,'PICKUP');});
 test('separate close obstruction prevents pickup and names obstacle',()=>{const h=harness();const p={access:{approach:'blocked',reach:'blocked',reachability:'easily_reachable',evidence:'Chair blocks reach'},obstacles:[close()]};h.observe(p);h.advance(500);h.observe(p);assert.equal(h.c.stage,'HOLD');assert.match(h.last().text,/chair/);});
 test('hazards repeat only on newer evidence at four second intervals',()=>{const h=harness();h.observe({obstacles:[close()]});h.advance(500);h.observe({obstacles:[close()]});assert.equal(h.outputs.length,1);h.advance(4000);h.observe({obstacles:[close()]});assert.equal(h.outputs.length,2);});
@@ -44,11 +45,11 @@ test('slow results remain valid when no movement instruction intervened',()=>{
 test('blank camera prompts a clearer view rather than blaming latency',()=>{
  const h=harness();const meta={stream:'s',seq:1,capturedAt:h.now()-50,orientation:null};
  h.c.observe({...h.scene(),source:'insufficient_image'},meta,h.now(),h.orientation());
- assert.equal(h.last().key,'camera-detail');assert.match(h.last().text,/too little detail/);
+ assert.equal(h.last().key,'camera-detail');assert.match(h.last().text,/clearer image/);
 });
 test('old target-missing result encourages search without walking',()=>{
  const h=harness();h.observe({target:{visible:false}},11000);
- assert.equal(h.last().stage,'SEARCH');assert.equal(h.last().physical,false);assert.match(h.last().text,/look around/);
+ assert.equal(h.last().stage,'SEARCH');assert.equal(h.last().physical,false);assert.match(h.last().text,/Turn slightly right/);
 });
 
 test('uncertain proximity never announces a distant object as close',()=>{
@@ -108,7 +109,7 @@ test('major rotation invalidates pending result but small jitter does not',()=>{
 
 function routeHarness() {
  const h=harness();h.c.config.routeMode=true;
- h.mask=(routes=[{direction:'CENTER',action:'FORWARD',points:[[.5,.95],[.5,.6]]}])=>h.c.observeRoute({pathPlan:{routes}},{stream:'s',seq:Math.floor(h.now()),capturedAt:h.now()-20,orientation:h.orientation()},h.now(),h.orientation());
+ h.mask=(routes=[{direction:'CENTER',action:'FORWARD',points:[[.5,.95],[.5,.6]]}])=>{const meta=h.c.history.at(-1)?.meta;if(meta)h.c.observeRoute({pathPlan:{routes},maskSignature:[[1]],width:128,height:96},meta,h.now(),h.orientation());};
  return h;
 }
 test('NVIDIA route overrides broad Gemini approach warning',()=>{
@@ -120,17 +121,25 @@ test('no floor route holds even if Gemini thinks approach is open',()=>{
 });
 test('NVIDIA continues without another Gemini response and cannot reuse pre-step frame',()=>{
  const h=routeHarness();h.observe();h.mask();const n=h.outputs.length;h.mask();assert.equal(h.outputs.length,n);
- h.advance(9000);h.mask();assert.equal(h.outputs.length,n+1);assert.equal(h.last().source,'nvidia_route');
+ h.advance(9000);h.mask();assert.equal(h.outputs.length,n);
 });
 test('mask route cannot bypass pickup or move without a target',()=>{
  const h=routeHarness();h.mask();assert.equal(h.outputs.length,0);
- const access={approach:'blocked',reach:'clear',reachability:'easily_reachable',evidence:'Reach is clear'};
- h.observe({access});h.advance(500);h.observe({access});assert.equal(h.last().stage,'PICKUP');
- const n=h.outputs.length;h.advance(9000);h.mask();assert.equal(h.outputs.length,n);
+ const access={approach:'clear',reach:'clear',reachability:'easily_reachable',evidence:'Reach is clear'};
+ h.observe({access});h.advance(500);h.observe({access});assert.notEqual(h.last().stage,'PICKUP');
+ h.mask();assert.equal(h.last().key,'route:final-approach');assert.match(h.last().text,/one more short step/);
+ h.advance(500);h.observe({access});assert.notEqual(h.last().stage,'PICKUP');
+ h.advance(500);h.observe({access});assert.equal(h.last().stage,'PICKUP');
+ assert.match(h.last().text,/arrived.*reach out and pick it up/i);
+ assert.equal(h.c.command('got it',h.now()),'complete');assert.match(h.last().text,/pickup confirmed.*arrived/i);
 });
-test('NVIDIA turns need two consistent masks',()=>{
- const h=routeHarness();h.observe();const r=[{direction:'LEFT',action:'TURN_LEFT'}];h.mask(r);assert.equal(h.outputs.length,0);
- h.advance(500);h.mask(r);assert.equal(h.last().stage,'ALIGN');
+test('early got it cannot complete before the guided arrival prompt',()=>{
+ const h=routeHarness();h.observe();assert.equal(h.c.command('got it',h.now()),'handled');
+ assert.notEqual(h.c.stage,'COMPLETE');assert.equal(h.c.pickupPending,false);
+});
+test('NVIDIA turn is spoken as soon as the matching mask confirms it',()=>{
+ const h=routeHarness();h.observe();const r=[{direction:'LEFT',action:'TURN_LEFT'}];h.mask(r);assert.equal(h.last().stage,'ALIGN');
+ assert.match(h.last().text,/turn slightly left/i);
 });
 
 test('named warning needs blocked floor path and near-center obstacle overlap',()=>{
@@ -139,11 +148,12 @@ test('named warning needs blocked floor path and near-center obstacle overlap',(
 });
 test('lost target suspends mask walking until reacquired',()=>{
  const h=routeHarness();h.observe();h.mask();h.advance(1000);h.observe({target:{visible:false}});
- const n=h.outputs.length;h.advance(9000);h.mask();assert.equal(h.outputs.length,n);
+ h.mask();assert.equal(h.last().key,'route:lost-view');assert.equal(h.last().stage,'HOLD');
 });
 test('turning away from remembered target prevents NVIDIA following old target coordinates',()=>{
  const h=routeHarness();h.observe();h.advance(1000);
- h.c.observeRoute({pathPlan:{routes:[{direction:'CENTER',action:'FORWARD'}]}},{stream:'s',seq:10,capturedAt:h.now()-20,orientation:h.orientation(40)},h.now(),h.orientation(40));
+ const meta={...h.c.history.at(-1).meta,orientation:h.orientation(0)};
+ h.c.observeRoute({pathPlan:{routes:[{direction:'CENTER',action:'FORWARD'}]}},meta,h.now(),h.orientation(40));
  assert.equal(h.last().key,'route:relocalize');assert.equal(h.c.routeScene,null);
 });
 
@@ -157,10 +167,13 @@ test('too far releases early reach hold and rechecks pickup after another step',
  h.c.command('too far',h.now());h.advance(500);h.observe({access});h.mask();
  assert.equal(h.last().stage,'APPROACH');assert.equal(h.c.reachRejected,true);
  h.advance(1000);h.observe({access});assert.equal(h.c.reachRejected,false);assert.equal(h.c.reachCount,1);
+ h.advance(500);h.observe({access});assert.equal(h.c.extraApproachPending,true);assert.notEqual(h.last().stage,'PICKUP');
+ h.mask();assert.equal(h.last().key,'route:final-approach');
+ h.advance(500);h.observe({access});assert.notEqual(h.last().stage,'PICKUP');
  h.advance(500);h.observe({access});assert.equal(h.last().stage,'PICKUP');
 });
 test('too far cannot force movement through a blocked NVIDIA route',()=>{
- const h=routeHarness();h.observe();h.c.command("can't reach it",h.now());h.advance(500);h.mask([]);
+ const h=routeHarness();h.observe();h.c.command("can't reach it",h.now());h.advance(500);h.observe();h.mask([]);
  assert.equal(h.last().key,'route:blocked');
 });
 test('inconsistent reach assessment releases hold rather than repeating it forever',()=>{

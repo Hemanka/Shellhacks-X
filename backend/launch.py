@@ -36,6 +36,9 @@ def main():
     processes = []
     handles = []
     environment = os.environ.copy()
+    cached_hf_home = runtime / "huggingface-no-symlinks"
+    if not environment.get("HF_HOME") and cached_hf_home.exists():
+        environment["HF_HOME"] = str(cached_hf_home)
     flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     try:
         public_url = args.phone_url or environment.get("PAIR_BASE_URL")

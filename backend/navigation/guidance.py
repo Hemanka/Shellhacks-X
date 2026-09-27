@@ -34,14 +34,22 @@ def guidance_for_step(
     target_visible = bool(perception.target and perception.target.visible)
 
     if not target_visible and action is not NavigationAction.ARRIVED:
-        # Searching changes the camera view, not the user's walking position.
-        # Even a remembered direction must not turn into a walking instruction.
+        if perception.scene_confidence < 0.65:
+            instruction = "Hold still while I check this view again."
+            context = "I can't confirm whether the target is in this view yet."
+            return NavigationGuidance(
+                instruction=instruction,
+                context=context,
+                spoken_text=instruction,
+                announcement_key="search:uncertain_view",
+            )
+        # Search with a small turn in place; never tell the user to pan the phone.
         blocked = any(
             sector.status is SectorStatus.BLOCKED
             for sector in (perception.sectors.left, perception.sectors.center, perception.sectors.right)
         )
-        instruction = "Stay in place and slowly pan your phone left and right to scan the room."
-        context = "I haven't spotted the target yet. Keep looking around."
+        instruction = "Turn slightly right, then stop."
+        context = "I'll check each new view for the target."
         warning = "Obstacles are nearby. " if blocked else ""
         return NavigationGuidance(
             instruction=instruction,

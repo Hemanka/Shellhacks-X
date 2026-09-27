@@ -3,8 +3,10 @@ import json
 import os
 import re
 import uuid
+from collections import OrderedDict
 from io import BytesIO
 from pathlib import Path
+from threading import Lock, Thread
 from time import perf_counter, time
 from typing import Any
 
@@ -30,7 +32,7 @@ from .perception import (
 )
 from .traversability.route import plan_routes
 from .traversability.debug import overlay_data_url
-from .traversability.segmenter import SegformerTraversabilitySegmenter
+from .traversability.segmenter import SegformerTraversabilitySegmenter, TraversabilityMask
 
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
@@ -51,8 +53,41 @@ ELEVENLABS_STT_URL = "https://api.elevenlabs.io/v1/speech-to-text"
 DEFAULT_ELEVENLABS_VOICE_ID = "JBFqnCBsd6RMkjVDRZzb"
 MAX_VOICE_COMMAND_BYTES = 10 * 1024 * 1024
 traversability_segmenter = SegformerTraversabilitySegmenter()
+traversability_masks: OrderedDict[tuple[str, int], tuple[float, TraversabilityMask]] = OrderedDict()
+traversability_masks_lock = Lock()
+mask_warmup_status: dict[str, Any] = {"state": "warming", "durationMs": None, "error": None}
+mask_warmup_lock = Lock()
+mask_warmup_thread: Thread | None = None
 # Per-model quota cooldown; navigation state remains session-local.
 gemini_model_cooldowns: dict[str, float] = {}
+
+
+def _warm_mask_model() -> None:
+    started = perf_counter()
+    try:
+        traversability_segmenter.warmup()
+    except Exception as exc:
+        with mask_warmup_lock:
+            mask_warmup_status.update(state="unavailable", durationMs=round((perf_counter() - started) * 1000, 1), error=type(exc).__name__)
+        print(f"Traversability model warm-up failed: {type(exc).__name__}: {exc}")
+        return
+    with mask_warmup_lock:
+        mask_warmup_status.update(state="ready", durationMs=round((perf_counter() - started) * 1000, 1), error=None)
+    print(f"Traversability model warmed in {mask_warmup_status['durationMs']:.1f} ms.")
+
+
+def start_mask_warmup() -> None:
+    """Warm the local segmentation model without delaying API startup."""
+    global mask_warmup_thread
+    with mask_warmup_lock:
+        if mask_warmup_thread is not None and mask_warmup_thread.is_alive():
+            return
+        mask_warmup_status.update(state="warming", durationMs=None, error=None)
+        mask_warmup_thread = Thread(target=_warm_mask_model, name="mask-model-warmup", daemon=True)
+        mask_warmup_thread.start()
+
+
+app.add_event_handler("startup", start_mask_warmup)
 
 VOICE_INSTRUCTIONS = {
     NavigationAction.FORWARD: "Move forward one small step.",
@@ -70,10 +105,16 @@ class FrameRequest(BaseModel):
     heading_deg: float = Field(default=0, ge=-360, le=360)
     capture_ms: float = Field(default=0, ge=0, le=60_000)
     frame_meta: FrameMeta | None = None
+    perception: dict[str, Any] | None = None
 
 
 class SpeechRequest(BaseModel):
     text: str = Field(min_length=1, max_length=500)
+
+
+class TraversabilityRouteRequest(BaseModel):
+    frame_meta: FrameMeta
+    perception: dict[str, Any]
 
 
 def serialize_decision(decision: NavigationDecision) -> dict[str, Any]:
@@ -200,14 +241,31 @@ def decode_image(data: str) -> bytes:
         raise HTTPException(status_code=400, detail="Invalid camera image encoding") from exc
 
 
-def traversability_result(image_bytes: bytes) -> dict[str, Any]:
+def mask_signature(mask: TraversabilityMask) -> list[list[float]]:
+    signature = []
+    for row in range(12):
+        signature_row = []
+        y1, y2 = round(row * mask.height / 12), round((row + 1) * mask.height / 12)
+        for col in range(16):
+            x1, x2 = round(col * mask.width / 16), round((col + 1) * mask.width / 16)
+            signature_row.append(round(float(mask.candidate_walkable_mask[y1:y2, x1:x2].mean()), 2))
+        signature.append(signature_row)
+    return signature
+
+
+def traversability_result(image_bytes: bytes, perception: dict[str, Any] | None = None,
+                          frame_meta: FrameMeta | None = None) -> dict[str, Any]:
     """Run Phase 1 semantic segmentation and serialize its live debug overlay."""
     started = perf_counter()
     try:
         with Image.open(BytesIO(image_bytes)) as source:
-            mask = traversability_segmenter.segment(source.convert("RGB"))
+            source.load()
+            image = source.convert("RGB")
     except (UnidentifiedImageError, OSError) as exc:
         raise HTTPException(status_code=400, detail="Invalid camera image") from exc
+
+    try:
+        mask = traversability_segmenter.segment(image)
     except Exception as exc:
         print(f"Traversability segmentation failed: {exc}")
         raise HTTPException(
@@ -215,7 +273,23 @@ def traversability_result(image_bytes: bytes) -> dict[str, Any]:
             detail="Local traversability segmentation is unavailable",
         ) from exc
 
+    if frame_meta is not None:
+        cache_key = (frame_meta.stream, frame_meta.seq)
+        with traversability_masks_lock:
+            traversability_masks[cache_key] = (perf_counter(), mask)
+            traversability_masks.move_to_end(cache_key)
+            while len(traversability_masks) > 8:
+                traversability_masks.popitem(last=False)
+
+    scene = perception or {}
+    target = scene.get("target") if isinstance(scene.get("target"), dict) else {}
+    target_bbox = target.get("bbox") if target.get("visible") else None
+    target_direction = target.get("direction", "CENTER")
+    if not isinstance(target_bbox, list) or len(target_bbox) != 4:
+        target_bbox = None
+
     stats = {name: round(value, 2) for name, value in mask.percentages().items()}
+    signature = mask_signature(mask)
     total_ms = (perf_counter() - started) * 1000
     print(
         f"Traversability: {mask.inference_ms:.1f} ms inference | "
@@ -224,7 +298,8 @@ def traversability_result(image_bytes: bytes) -> dict[str, Any]:
     )
     return {
         "overlayDataUrl": overlay_data_url(mask),
-        "pathPlan": plan_routes(mask),
+        "pathPlan": plan_routes(mask, target_bbox, target_direction),
+        "maskSignature": signature,
         "percentages": stats,
         "inferenceMs": round(mask.inference_ms, 2),
         "totalMs": round(total_ms, 2),
@@ -248,14 +323,34 @@ def elevenlabs_key() -> str | None:
     return os.getenv("ELEVENLABS_API_KEY")
 
 
+def elevenlabs_error_message(response: requests.Response | None) -> str:
+    if response is None:
+        return ""
+    try:
+        body = response.json()
+    except ValueError:
+        return ""
+    detail = body.get("detail") or body.get("message") or body.get("error") or ""
+    if isinstance(detail, dict):
+        detail = detail.get("message") or detail.get("status") or detail.get("code") or ""
+    return str(detail)[:500]
+
+
+def elevenlabs_quota_exhausted(response: requests.Response | None) -> bool:
+    return bool(re.search(r"quota|credits? remaining|out of credits", elevenlabs_error_message(response), re.I))
+
+
 @app.get("/api/health")
-def health() -> dict[str, str | bool]:
+def health() -> dict[str, Any]:
     configured = bool(gemini_key())
+    with mask_warmup_lock:
+        mask_model = dict(mask_warmup_status)
     return {
         "status": "ok",
         "gemini_configured": configured,
         "elevenlabs_configured": bool(elevenlabs_key()),
         "demo_mode": os.getenv("DEMO_MODE", "false").lower() == "true",
+        "mask_model": mask_model,
     }
 
 
@@ -283,6 +378,8 @@ def create_speech(payload: SpeechRequest) -> Response:
         )
         response.raise_for_status()
     except requests.RequestException as exc:
+        if exc.response is not None and elevenlabs_quota_exhausted(exc.response):
+            raise HTTPException(status_code=429, detail="ElevenLabs credits are exhausted; using the phone's built-in voice") from exc
         detail = "ElevenLabs could not generate speech"
         if exc.response is not None:
             detail = f"ElevenLabs request failed ({exc.response.status_code})"
@@ -337,6 +434,8 @@ def transcribe_voice_command(file: UploadFile = File(...)) -> dict[str, str]:
         response.raise_for_status()
         transcript = response.json().get("text", "").strip()
     except requests.RequestException as exc:
+        if exc.response is not None and elevenlabs_quota_exhausted(exc.response):
+            raise HTTPException(status_code=429, detail="ElevenLabs credits are exhausted; use browser speech recognition or add credits") from exc
         detail = "ElevenLabs could not transcribe the voice command"
         if exc.response is not None:
             detail = f"ElevenLabs transcription failed ({exc.response.status_code})"
@@ -418,7 +517,7 @@ def analyze_frame(payload: FrameRequest) -> dict[str, Any]:
                 GEMINI_URL_TEMPLATE.format(model=model),
                 params={"key": api_key},
                 json=body,
-                timeout=12,
+                timeout=30,
             )
             attempts.append({"model": model, "status": response.status_code, "durationMs": round((perf_counter()-attempt_started)*1000, 1)})
             if response.status_code == 429:
@@ -444,7 +543,11 @@ def analyze_frame(payload: FrameRequest) -> dict[str, Any]:
             source = "fallback"
     except requests.RequestException as exc:
         gemini_ms = (perf_counter() - gemini_started) * 1000
-        perception_error = "Gemini could not analyze this frame"
+        if isinstance(exc, requests.Timeout):
+            perception_error = "Gemini request timed out before Google replied"
+        else:
+            perception_error = f"Gemini connection failed ({type(exc).__name__})"
+        print(f"Gemini transport failure: {type(exc).__name__}")
         if exc.response is not None:
             perception_error = f"Gemini request failed ({exc.response.status_code})"
             if exc.response.status_code == 429:
@@ -488,9 +591,40 @@ def analyze_frame(payload: FrameRequest) -> dict[str, Any]:
 @app.post("/api/traversability-frame")
 def analyze_traversability_frame(payload: FrameRequest) -> dict[str, Any]:
     """Return the local Phase 1 mask independently from cloud navigation."""
-    result = traversability_result(decode_image(payload.image_base64))
+    result = traversability_result(decode_image(payload.image_base64), payload.perception, payload.frame_meta)
+    with mask_warmup_lock:
+        if mask_warmup_status["state"] != "ready":
+            mask_warmup_status.update(state="ready", error=None)
     result["frame_meta"] = payload.frame_meta.model_dump() if payload.frame_meta else None
     return result
+
+
+@app.post("/api/traversability-route")
+def plan_traversability_route(payload: TraversabilityRouteRequest) -> dict[str, Any]:
+    """Plan against the already-computed mask for this exact camera frame."""
+    key = (payload.frame_meta.stream, payload.frame_meta.seq)
+    with traversability_masks_lock:
+        cached = traversability_masks.get(key)
+        if cached and perf_counter() - cached[0] > 30:
+            traversability_masks.pop(key, None)
+            cached = None
+        if cached:
+            traversability_masks.move_to_end(key)
+    if not cached:
+        raise HTTPException(status_code=409, detail="Matching camera mask is not ready")
+    mask = cached[1]
+    scene = payload.perception
+    target = scene.get("target") if isinstance(scene.get("target"), dict) else {}
+    target_bbox = target.get("bbox") if target.get("visible") else None
+    if not isinstance(target_bbox, list) or len(target_bbox) != 4:
+        target_bbox = None
+    return {
+        "pathPlan": plan_routes(mask, target_bbox, target.get("direction", "CENTER")),
+        "maskSignature": mask_signature(mask),
+        "width": mask.width,
+        "height": mask.height,
+        "frame_meta": payload.frame_meta.model_dump(),
+    }
 
 
 app.mount("/", StaticFiles(directory=ROOT / "frontend", html=True), name="frontend")

@@ -7,15 +7,16 @@
 </head>
 <body>
   <main>
-    <p class="brand">WAYFINDER</p><h1>Your voice.<br>Your next step.</h1>
-    <p id="status" role="status">Connect your camera and microphone to begin.</p>
-    <button id="allow-permissions" class="primary">Allow camera &amp; microphone</button>
+    <p class="brand">WAYFINDER</p><h1>Find what<br>you need.</h1>
+    <p id="status" role="status">Connect your camera to begin.</p>
+    <button id="allow-permissions" class="primary">Allow camera</button>
     <section aria-label="Voice input">
-      <p class="label">YOU SAID</p><p id="transcript">Tell me what you want to find.</p>
-      <button id="record-command" disabled>Tap to speak</button>
+      <p class="label">SAY WHAT YOU WANT TO FIND OR ANSWER</p>
+      <button id="voice-command" class="primary" disabled aria-pressed="false">Start speaking</button>
+      <p id="voice-status" role="status" aria-live="polite">Connect and allow microphone access to speak.</p>
     </section>
     <section aria-label="Spoken guidance">
-      <p class="label">YOUR NEXT STEP</p><p id="spoken-output" aria-live="off">Waiting for your voice command.</p>
+      <p class="label">YOUR NEXT STEP</p><p id="spoken-output" aria-live="off">Waiting for your request.</p>
       <button id="repeat-guidance" disabled>Hear again</button>
       <button id="pause-guidance" disabled>Pause guidance</button>
     </section>

@@ -5,7 +5,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 async function dashboardHarness(modern = false) {
-  const elements = new Map(), outbound = [], requests = [];
+  const elements = new Map(), outbound = [], requests = [], requestLog = [];
   let socket; const intervals=[];
   function element(id) {
     if (!elements.has(id)) elements.set(id, {
@@ -39,8 +39,10 @@ async function dashboardHarness(modern = false) {
       constructor() { socket = this; } send(text) { outbound.push(JSON.parse(text)); } close() {} },
     fetch: async (url, options) => {
       requests.push(url);
+      requestLog.push({ url, options });
       const payload = url === '/api/pairing' ? { session_id: 'test', secure: true, qr_data_url: 'qr', mobile_url: 'https://phone.example/mobile.html?session=test' }
         : url === '/api/health' ? { gemini_configured: true, elevenlabs_configured: true }
+          : url === '/api/traversability-route' ? { pathPlan: { routes: [{ direction: 'CENTER', action: 'FORWARD', points: [[.5,.95],[.5,.6]] }] }, maskSignature: [[1]], width: 128, height: 96, frame_meta: JSON.parse(options.body).frame_meta }
           : url === '/api/traversability-frame' ? { overlayDataUrl: 'mask', totalMs: 250, inferenceMs: 200, percentages: {}, pathPlan:{routes:[{direction:'CENTER',action:'FORWARD'}]} } : scene;
       if(modern && ['/api/analyze-frame','/api/traversability-frame'].includes(url)) payload.frame_meta=JSON.parse(options.body).frame_meta;
       return { ok: true, json: async () => payload };
@@ -51,7 +53,7 @@ async function dashboardHarness(modern = false) {
   vm.runInContext('globalThis.sessionState = state;', context);
   await new Promise(setImmediate);
   socket.onopen();
-  return { elements, outbound, requests, context, intervals, state: context.sessionState,
+  return { elements, outbound, requests, requestLog, context, intervals, state: context.sessionState,
     message: message => socket.onmessage({ data: JSON.stringify(message) }),
   };
 }
@@ -88,11 +90,13 @@ test('current dashboard sends frame-linked expiring instructions with the sessio
   const meta={stream:'phone',seq:1,capturedAt:performance.now(),orientation:null};
   await h.message({type:'frame',image_base64:'data:image/jpeg;base64,test',meta});
   await h.message({type:'transcript',text:'Find bottle'});
-  h.state.nextMaskAt=0;
-  await h.message({type:'frame',image_base64:'data:image/jpeg;base64,test',meta:{...meta,seq:2,capturedAt:performance.now()}});
-  vm.runInContext('tickTraversability()',h.context);await new Promise(setImmediate);
+  await new Promise(setImmediate);
+  const routeRequest=h.requestLog.find(call=>call.url==='/api/traversability-route');
+  assert.ok(routeRequest);
+  assert.deepEqual(JSON.parse(routeRequest.options.body).frame_meta,meta);
+  assert.equal(JSON.parse(routeRequest.options.body).perception.target.label,'bottle');
   const cue=h.outbound.find(x=>x.id && x.stage==='APPROACH');
-  assert.ok(cue);assert.equal(cue.evidenceFrame,2);assert.equal(cue.stream,'phone');
+  assert.ok(cue);assert.equal(cue.evidenceFrame,1);assert.equal(cue.stream,'phone');
   assert.equal(cue.expiresAt,null);
   assert.ok(h.outbound.some(x=>x.type==='session_state' && x.revision===cue.revision));
   assert.match(h.elements.get('controller-summary').textContent,/APPROACH/);
