@@ -47,7 +47,7 @@ def main():
             tunnel_log = log_path.open("w", encoding="utf-8")
             handles.append(tunnel_log)
             tunnel = subprocess.Popen(
-                [str(tunnel_path), "tunnel", "--url", local_url, "--no-autoupdate"],
+                [str(tunnel_path), "tunnel", "--protocol", "http2", "--url", local_url, "--no-autoupdate"],
                 cwd=ROOT, stdout=tunnel_log, stderr=subprocess.STDOUT, creationflags=flags,
             )
             processes.append(tunnel)

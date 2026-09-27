@@ -40,7 +40,11 @@ window.WayfinderSpeech = class {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ text }), signal: this.request.signal,
         });
-        if (!response.ok) throw new Error(`Speech service returned HTTP ${response.status}`);
+        if (!response.ok) {
+          let detail = '';
+          try { detail = (await response.json()).detail || ''; } catch {}
+          throw new Error(`Speech service returned HTTP ${response.status}${detail ? `: ${detail}` : ''}`);
+        }
         blob = await response.blob();
         if (sequence !== this.sequence) return;
         if (!valid()) { this.stop(); this.report('expired', 'Instruction expired before audio'); return; }

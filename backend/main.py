@@ -40,6 +40,12 @@ app = FastAPI(title="Wayfinder Gemini API", version="0.1.0")
 app.include_router(pairing_router)
 GEMINI_URL_TEMPLATE = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 DEFAULT_GEMINI_MODELS = ("gemini-3.1-flash-lite", "gemini-3.5-flash-lite")
+# The local desktop sandbox may inject an unusable proxy for outbound API calls.
+# Gemini traffic should use the machine's direct HTTPS connection.
+gemini_session = requests.Session()
+gemini_session.trust_env = False
+elevenlabs_session = requests.Session()
+elevenlabs_session.trust_env = False
 ELEVENLABS_URL = "https://api.elevenlabs.io/v1/text-to-speech"
 ELEVENLABS_STT_URL = "https://api.elevenlabs.io/v1/speech-to-text"
 DEFAULT_ELEVENLABS_VOICE_ID = "JBFqnCBsd6RMkjVDRZzb"
@@ -264,7 +270,7 @@ def create_speech(payload: SpeechRequest) -> Response:
     voice_id = os.getenv("ELEVENLABS_VOICE_ID", DEFAULT_ELEVENLABS_VOICE_ID)
     model_id = os.getenv("ELEVENLABS_MODEL_ID", "eleven_flash_v2_5")
     try:
-        response = requests.post(
+        response = elevenlabs_session.post(
             f"{ELEVENLABS_URL}/{voice_id}",
             params={"output_format": "mp3_44100_128"},
             headers={
@@ -310,7 +316,7 @@ def transcribe_voice_command(file: UploadFile = File(...)) -> dict[str, str]:
         raise HTTPException(status_code=413, detail="The voice command is too large")
 
     try:
-        response = requests.post(
+        response = elevenlabs_session.post(
             ELEVENLABS_STT_URL,
             headers={"xi-api-key": api_key},
             files={
@@ -408,7 +414,7 @@ def analyze_frame(payload: FrameRequest) -> dict[str, Any]:
         for index, model in enumerate(models):
             model_used = model
             attempt_started = perf_counter()
-            response = requests.post(
+            response = gemini_session.post(
                 GEMINI_URL_TEMPLATE.format(model=model),
                 params={"key": api_key},
                 json=body,

@@ -99,8 +99,7 @@
         if (ready || this.pickupPending) {
           return this.cue('HOLD', blockedReach ? `Stay here. ${blockedReach.label || 'An obstacle'} is between you and the item.` : 'The item appears comfortably within reach. Stay here while I confirm, or say too far if you need to move closer.', 'check-reach', now);
         }
-        this.reason = 'Target located; NVIDIA selects approach'; this.snapshot();
-        return;
+        return this.cue('HOLD', `I found the ${t.label || this.target}. Stay in place while I check for a clear floor path.`, 'target-found-route-pending', now, meta);
       }
       const obstacles = p.obstacles || [];
       const hazards = obstacles.filter(o => o.confidence >= this.config.confidence && o.proximity === 'appears_close' && o.proximityConfidence >= .85

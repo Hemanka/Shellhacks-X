@@ -1,7 +1,7 @@
 // Start at most four analyses per second; slow requests never accumulate.
 const SCAN_INTERVAL_MS = 250;
 const SCAN_POLL_MS = 50;
-const MASK_INTERVAL_MS = 250;
+const MASK_INTERVAL_MS = 1000;
 
 const state = {
   running: false,
@@ -22,7 +22,6 @@ const state = {
   revision: 0,
   maskAnalyzing: false,
   nextMaskAt: 0,
-  maskedRemoteFrameId: -1,
   remoteFrameId: 0,
   analyzedRemoteFrameId: -1,
   remoteFrameAt: 0,
@@ -167,31 +166,19 @@ function addSightings(result) {
   $("camera-label").textContent =
     `${result.candidates.length} TARGET BOX${result.candidates.length === 1 ? "" : "ES"}`;
   if (state.cameraActive) $("camera-placeholder").classList.add("hidden");
-  result.candidates.slice(0, 5).forEach((candidate) => {
-    if (!state.registry.some((item) => item.label === candidate.label))
-      state.registry.push({
-        label: candidate.label,
-        score: Math.round(candidate.score * 100),
-        target: candidate.label
-          .toLowerCase()
-          .includes(targetInput.value.toLowerCase().split(" ").pop()),
-      });
-  });
-  obstacles.forEach((obstacle) => {
-    const key = `${obstacle.label}:${obstacle.direction}`;
-    const existing = state.registry.find((item) => item.key === key);
-    if (existing) {
-      existing.score = Math.round(obstacle.confidence * 100);
-    } else {
-      state.registry.push({
-        key,
-        label: obstacle.label,
-        direction: obstacle.direction,
-        score: Math.round(obstacle.confidence * 100),
-        target: false,
-      });
-    }
-  });
+  // Show this frame's evidence only; an old sighting must not look current.
+  state.registry = result.candidates.slice(0, 5).map((candidate) => ({
+    label: candidate.label,
+    score: Math.round(candidate.score * 100),
+    target: true,
+  }));
+  obstacles.forEach((obstacle) => state.registry.push({
+    key: `${obstacle.label}:${obstacle.direction}`,
+    label: obstacle.label,
+    direction: obstacle.direction,
+    score: Math.round(obstacle.confidence * 100),
+    target: false,
+  }));
   renderRegistry();
 }
 
@@ -241,7 +228,11 @@ function updateTraversability(requestBody, isCurrent) {
     body: JSON.stringify(requestBody),
   })
     .then(async (response) => {
-      if (!response.ok) throw new Error(`Mask service returned ${response.status}`);
+      if (!response.ok) {
+        let detail = '';
+        try { detail = (await response.json()).detail || ''; } catch {}
+        throw new Error(`Mask service returned ${response.status}${detail ? `: ${detail}` : ''}`);
+      }
       return response.json();
     })
     .then((result) => { if (isCurrent()) { renderTraversability(result); window.WayfinderDashboard?.mask(result); if (state.running && !state.listening) navigation?.observeRoute(result, result.frame_meta, phoneNow(), state.orientation); } })
@@ -253,25 +244,6 @@ function updateTraversability(requestBody, isCurrent) {
     })
     .finally(() => { state.maskAnalyzing = false; });
 }
-
-// Run local segmentation on fresh phone frames independently of Gemini latency,
-// quota cooldowns, and voice recording. Never queue a second mask request.
-function tickTraversability() {
-  if (!state.running || !state.cameraActive || !state.remoteFrame ||
-      state.maskAnalyzing || Date.now() < state.nextMaskAt ||
-      state.maskedRemoteFrameId === state.remoteFrameId ||
-      Date.now() - state.remoteFrameAt > 2000) return;
-  const revision = state.revision;
-  state.maskedRemoteFrameId = state.remoteFrameId;
-  updateTraversability({
-    image_base64: state.remoteFrame,
-    target_object: targetInput.value,
-    frame_meta: state.frameMeta,
-    heading_deg: state.heading,
-    capture_ms: 0,
-  }, () => state.running && state.cameraActive && state.revision === revision);
-}
-setInterval(tickTraversability, SCAN_POLL_MS);
 
 async function analyzeFrame() {
   if (state.analyzing || !state.running || state.listening ||
@@ -319,8 +291,9 @@ async function analyzeFrame() {
       capture_ms: captureMs,
       frame_meta: frameMeta,
     };
-    if (state.remoteFrame) tickTraversability();
-    else updateTraversability(requestBody, isCurrent);
+    // Use the same decoded, normalized JPEG for Gemini and segmentation.
+    // The raw phone data URL can be rejected by Pillow even when browsers decode it.
+    updateTraversability(requestBody, isCurrent);
     const response = await fetch("/api/analyze-frame", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
