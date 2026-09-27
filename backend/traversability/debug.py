@@ -73,12 +73,13 @@ def transparent_overlay(
 ) -> Image.Image:
     """Render a browser-friendly transparent categorical overlay.
 
-    Candidate floor is deliberately labelled as a candidate rather than safe.
-    Non-walkable pixels stay transparent so the camera feed remains readable.
+    Candidate floor and pixel-shaped non-walkable regions remain distinguishable
+    over the live image; no object bounding boxes are painted into the mask.
     """
     pixels = np.zeros((mask.height, mask.width, 4), dtype=np.uint8)
     pixels[mask.candidate_walkable_mask] = [45, 220, 115, 105]
     pixels[mask.unknown_mask] = [145, 150, 160, 55]
+    pixels[mask.non_walkable_mask] = [235, 72, 66, 78]
     pixels[mask.blocked_mask] = [245, 55, 65, 175]
     overlay = Image.fromarray(pixels, mode="RGBA")
     scale = min(1.0, maximum_dimension / max(mask.width, mask.height))
