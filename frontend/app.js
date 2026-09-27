@@ -472,6 +472,7 @@ async function startSession() {
   $("session-state").textContent = "Scanning";
   $("start-label").textContent = "Pause session";
   $("connection-label").textContent = "VISION LOOP ACTIVE";
+  state.quotaAnnounced = false;
   setScanStatus("CAPTURING", "CAPTURING LIVE FRAME");
   if (!state.startedAt) {
     state.startedAt = Date.now();
@@ -499,12 +500,14 @@ async function startSession() {
     await analyzeFrame();
   } catch (error) {
     if (error.status === 429 || error.message.includes("quota")) {
-      state.running = false;
-      clearInterval(state.scanTimer);
-      $("session-state").textContent = "Quota reached";
-      $("start-label").textContent = "Retry later";
-      $("camera-label").textContent = "GEMINI QUOTA EXCEEDED";
-      $("scan-status").textContent = "QUOTA STOPPED";
+      $("session-state").textContent = "Scanning";
+      $("start-label").textContent = "Pause session";
+      setScanStatus("WAITING QUOTA", "CAMERA ACTIVE / GEMINI WAITING");
+      setInstruction("Waiting for Gemini quota.", "The camera is still active. Retrying in 3 seconds.", 0, false);
+      if (!state.quotaAnnounced) {
+        state.quotaAnnounced = true;
+        speak("Processing");
+      }
     } else {
       setScanStatus("RETRYING", "LIVE CAMERA / GEMINI RETRYING");
     }
@@ -517,12 +520,14 @@ async function startSession() {
       void analyzeLocalRouteFrame();
       if (Date.now() >= state.backoffUntil) analyzeFrame().catch((error) => {
         if (error.status === 429 || error.message.includes("quota")) {
-          state.running = false;
-          clearInterval(state.scanTimer);
-          $("session-state").textContent = "Quota reached";
-          $("start-label").textContent = "Retry later";
-          $("camera-label").textContent = "GEMINI QUOTA EXCEEDED";
-          $("scan-status").textContent = "QUOTA STOPPED";
+          $("session-state").textContent = "Scanning";
+          $("start-label").textContent = "Pause session";
+          setScanStatus("WAITING QUOTA", "CAMERA ACTIVE / GEMINI WAITING");
+          setInstruction("Waiting for Gemini quota.", "The camera is still active. Retrying in 3 seconds.", 0, false);
+          if (!state.quotaAnnounced) {
+            state.quotaAnnounced = true;
+            speak("Processing");
+          }
         } else {
           setScanStatus("RETRYING", "LIVE CAMERA / GEMINI RETRYING");
         }
