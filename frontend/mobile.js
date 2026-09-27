@@ -1,10 +1,12 @@
 const phone = {
   socket: null, stream: null, frameTimer: null, dashboard: false, running: false,
   listening: false, lastGuidance: '', connecting: false, handsFree: false,
-  recognizer: null, recognizerStarting: false, speechSuspended: false, forceFallback: false,
+  recognizer: null, recognizerStarting: false, speechSuspended: false,
+  transcriber: 'detecting', elevenLabsConfigured: false,
   awaitingResponse: false, awaitingInitialItem: false, hasTarget: false,
   wakeArmedUntil: 0, recorder: null, audioContext: null, analyser: null,
-  audioFrame: 0, silenceTimer: null, voiceChunks: [], speechStartedAt: 0,
+  audioFrame: 0, audioInspect: null, transcribing: false,
+  silenceTimer: null, voiceChunks: [], speechStartedAt: 0,
 };
 const el = id => document.getElementById(id);
 const phoneVideo = el('phone-video');
@@ -17,8 +19,26 @@ function setStatus(text) { el('status').textContent = text; }
 function displayTarget(target) {
   el('target-value').textContent = String(target || '').trim() || 'Waiting for an item';
 }
-function updateListeningStatus(text = 'Mic is on. Say “Hey SeekR” and your request, or answer a question.') {
+function browserRecognitionAvailable() { return !!(window.SpeechRecognition || window.webkitSpeechRecognition); }
+function updateListeningStatus(text = `${phone.transcriber === 'elevenlabs' ? 'ElevenLabs Scribe' : phone.transcriber === 'browser' ? 'Browser speech recognition' : 'Mic'} is on. ${phone.hasTarget ? 'Say “Hey SeekR” and your request, or answer a question.' : 'Say an item, like “red cup” or “black hoodie.”'}`) {
   el('voice-status').textContent = text;
+}
+async function selectTranscriber() {
+  phone.transcriber = 'detecting';
+  try {
+    const response = await fetch('/api/health', { cache: 'no-store' });
+    if (!response.ok) throw new Error(`Health check returned ${response.status}`);
+    const health = await response.json();
+    phone.elevenLabsConfigured = Boolean(health.elevenlabs_configured);
+  } catch {
+    phone.elevenLabsConfigured = false;
+  }
+  phone.transcriber = phone.elevenLabsConfigured ? 'elevenlabs'
+    : browserRecognitionAvailable() ? 'browser' : 'unavailable';
+  sendPhone({ type: 'phone_status', transcriber: phone.transcriber,
+    detail: phone.transcriber === 'elevenlabs' ? 'ElevenLabs Scribe selected' :
+      phone.transcriber === 'browser' ? 'Browser speech recognition selected; ElevenLabs is not configured' :
+        'No speech recognition provider is available' });
 }
 function setDashboardListening(active) {
   if (phone.listening === active) return;
@@ -75,7 +95,7 @@ function stopFallbackCapture() {
     try { phone.recorder.stop(); } catch {}
   }
   phone.recorder = null; phone.voiceChunks = [];
-  phone.audioContext?.close().catch(()=>{}); phone.audioContext = null; phone.analyser = null;
+  phone.audioContext?.close().catch(()=>{}); phone.audioContext = null; phone.analyser = null; phone.audioInspect = null;
 }
 function stopPhoneInput() {
   phone.handsFree = false; stopRecognition(); stopFallbackCapture();
@@ -186,9 +206,14 @@ function resumeRecognition() {
   startHandsFree();
 }
 function startHandsFree() {
-  if (!phone.handsFree || !phone.dashboard || phone.speechSuspended || document.hidden || phone.recognizer || phone.recognizerStarting) return;
-  const Recognition = phone.forceFallback ? null : (window.SpeechRecognition || window.webkitSpeechRecognition);
-  if (!Recognition) { startFallbackListener(); return; }
+  if (!phone.handsFree || !phone.dashboard || phone.speechSuspended || document.hidden || phone.recognizer || phone.recognizerStarting || phone.transcriber === 'detecting') return;
+  if (phone.transcriber === 'elevenlabs') { startElevenLabsListener(); return; }
+  if (phone.transcriber === 'unavailable') {
+    updateListeningStatus('Speech recognition is unavailable. Add an ElevenLabs key or use a browser with speech recognition.');
+    return;
+  }
+  const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!Recognition) { phone.transcriber = 'unavailable'; startHandsFree(); return; }
   const recognizer = new Recognition(); phone.recognizer = recognizer; phone.recognizerStarting = true;
   recognizer.lang = navigator.language || 'en-US'; recognizer.continuous = true;
   recognizer.interimResults = true; recognizer.maxAlternatives = 1;
@@ -215,7 +240,14 @@ function startHandsFree() {
     if (phone.recognizer !== recognizer) return;
     phone.recognizer = null; phone.recognizerStarting = false;
     if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
-      phone.forceFallback = true; setStatus('Using the microphone transcription fallback.'); startFallbackListener();
+      if (phone.elevenLabsConfigured) {
+        phone.transcriber = 'elevenlabs';
+        updateListeningStatus('Switching to ElevenLabs Scribe.');
+        startElevenLabsListener();
+      } else {
+        phone.transcriber = 'unavailable';
+        updateListeningStatus('Allow browser speech recognition, or configure ElevenLabs transcription.');
+      }
       return;
     }
     setTimeout(startHandsFree, 500);
@@ -227,23 +259,53 @@ function startHandsFree() {
     if (phone.handsFree && !phone.speechSuspended) setTimeout(startHandsFree, 250);
   };
   try { recognizer.start(); } catch {
-    phone.recognizer = null; phone.recognizerStarting = false; phone.forceFallback = true; startFallbackListener();
+    phone.recognizer = null; phone.recognizerStarting = false;
+    if (phone.elevenLabsConfigured) { phone.transcriber = 'elevenlabs'; startElevenLabsListener(); }
+    else { phone.transcriber = 'unavailable'; startHandsFree(); }
   }
 }
-function startFallbackListener() {
-  if (!phone.handsFree || !phone.dashboard || phone.speechSuspended || phone.audioContext || !phone.stream || !window.MediaRecorder) return;
+function startElevenLabsListener() {
+  if (!phone.handsFree || !phone.dashboard || document.hidden || !phone.stream) return;
+  if (!phone.elevenLabsConfigured) {
+    phone.transcriber = browserRecognitionAvailable() ? 'browser' : 'unavailable';
+    startHandsFree();
+    return;
+  }
+  if (!window.MediaRecorder) {
+    phone.transcriber = browserRecognitionAvailable() ? 'browser' : 'unavailable';
+    startHandsFree();
+    return;
+  }
   const AudioContext = window.AudioContext || window.webkitAudioContext;
-  if (!AudioContext) { updateListeningStatus('Voice wake word is unavailable in this browser. Keep the page open in Safari or Chrome.'); return; }
+  if (!AudioContext) {
+    phone.transcriber = browserRecognitionAvailable() ? 'browser' : 'unavailable';
+    startHandsFree();
+    return;
+  }
+  if (phone.audioContext) {
+    const restartInspection = () => {
+      if (phone.handsFree && !document.hidden && phone.audioInspect && !phone.audioFrame) {
+        phone.audioFrame = requestAnimationFrame(phone.audioInspect);
+      }
+    };
+    if (phone.audioContext.state === 'suspended') void phone.audioContext.resume().then(restartInspection).catch(() => {});
+    else restartInspection();
+    return;
+  }
   try {
     phone.audioContext = new AudioContext();
     const source = phone.audioContext.createMediaStreamSource(new MediaStream(phone.stream.getAudioTracks()));
     phone.analyser = phone.audioContext.createAnalyser(); phone.analyser.fftSize = 1024; source.connect(phone.analyser);
     const samples = new Uint8Array(phone.analyser.fftSize);
     const inspect = () => {
-      if (!phone.handsFree || phone.speechSuspended || !phone.analyser) return;
+      if (!phone.handsFree || !phone.analyser || document.hidden) { phone.audioFrame = 0; return; }
       phone.analyser.getByteTimeDomainData(samples);
       let energy = 0; for (const sample of samples) { const v = (sample - 128) / 128; energy += v * v; }
-      const voiced = Math.sqrt(energy / samples.length) > 0.035 && !speech.busy;
+      // Keep this animation loop alive while SeekR speaks. Only capture when
+      // the mic is available for user input; exiting here used to strand the
+      // ElevenLabs listener after the first spoken reply.
+      const canCapture = !phone.speechSuspended && !speech.busy && !phone.transcribing;
+      const voiced = canCapture && Math.sqrt(energy / samples.length) > 0.022;
       if (voiced && !phone.recorder) beginFallbackUtterance();
       if (phone.recorder?.state === 'recording') {
         if (voiced) { clearTimeout(phone.silenceTimer); phone.silenceTimer = null; }
@@ -251,7 +313,8 @@ function startFallbackListener() {
       }
       phone.audioFrame = requestAnimationFrame(inspect);
     };
-    void phone.audioContext.resume().then(()=>{ phone.audioFrame = requestAnimationFrame(inspect); });
+    phone.audioInspect = inspect;
+    void phone.audioContext.resume().then(()=>{ if (phone.handsFree && !document.hidden && !phone.audioFrame) phone.audioFrame = requestAnimationFrame(inspect); });
   } catch { updateListeningStatus('Could not start hands-free listening in this browser.'); }
 }
 function beginFallbackUtterance() {
@@ -264,20 +327,33 @@ function beginFallbackUtterance() {
       if (recorder.__cancelled || phone.recorder !== recorder) return;
       phone.recorder = null; setDashboardListening(false);
       const blob = new Blob(phone.voiceChunks,{type:recorder.mimeType || 'audio/webm'}); phone.voiceChunks=[];
-      if (performance.now()-phone.speechStartedAt >= 350) void transcribeFallback(blob);
+      if (performance.now()-phone.speechStartedAt >= 350) void transcribeWithElevenLabs(blob);
     };
     recorder.start(); setDashboardListening(true); updateListeningStatus('Listening…');
   } catch { phone.recorder = null; }
 }
 function finishFallbackUtterance() { clearTimeout(phone.silenceTimer); phone.silenceTimer=null; if(phone.recorder?.state==='recording') phone.recorder.stop(); }
-async function transcribeFallback(blob) {
+async function transcribeWithElevenLabs(blob) {
+  if (phone.transcribing) return;
+  phone.transcribing = true;
   try {
     const form = new FormData(); form.append('file',blob,`voice-command.${blob.type.includes('mp4')?'mp4':blob.type.includes('ogg')?'ogg':'webm'}`);
     const response = await fetch('/api/transcribe',{method:'POST',body:form});
-    if(!response.ok) throw new Error(`Transcription failed (${response.status}).`);
+    if(!response.ok) {
+      let detail=''; try { detail=(await response.json()).detail || ''; } catch {}
+      const error=new Error(detail || `Transcription failed (${response.status}).`); error.status=response.status; throw error;
+    }
     const result = await response.json(); routeUtterance(result.text || '');
   } catch (error) {
-    setDashboardListening(false); updateListeningStatus(error.message || 'Could not transcribe speech.');
+    setDashboardListening(false);
+    if (error.status === 422) { updateListeningStatus('I didn’t catch that. Please say it again.'); return; }
+    // Keep the ElevenLabs listener alive and retry on the next spoken turn.
+    // A transient network or quota error must not silently switch providers
+    // and disable the expected wake-phrase path.
+    updateListeningStatus(`ElevenLabs transcription failed. Keep listening and try again. ${error.message || ''}`.trim());
+    sendPhone({type:'phone_status',transcriber:'elevenlabs',detail:error.message || 'ElevenLabs transcription failed; listener remains active'});
+  } finally {
+    phone.transcribing = false;
   }
 }
 el('allow-permissions').addEventListener('click', async () => {
@@ -305,7 +381,10 @@ el('allow-permissions').addEventListener('click', async () => {
     if(!phone.socket || phone.socket.readyState>WebSocket.OPEN) connectPhone();
     clearInterval(phone.frameTimer); phone.frameTimer=setInterval(sendFrame,200);
     reportPermissions(); setPhoneReady();
-    updateListeningStatus(phone.awaitingInitialItem ? 'Mic is on. Say an item and its visual details, like “red cup.”' : undefined);
+    await selectTranscriber();
+    updateListeningStatus(phone.awaitingInitialItem
+      ? `${phone.transcriber === 'elevenlabs' ? 'ElevenLabs Scribe' : phone.transcriber === 'browser' ? 'Browser speech recognition' : 'Mic'} is on. Say an item and its visual details, like “red cup.”`
+      : undefined);
     startHandsFree();
   } catch(error) {
     phone.stream?.getTracks().forEach(track=>track.stop()); phone.stream=null;

@@ -118,14 +118,13 @@ Set `ELEVENLABS_API_KEY` in `.env` to have every live guidance instruction spoke
 ## Voice target selection
 
 On the phone, tap **Start SeekR** once, then say “red cup” or “black hoodie.”
-After that first target, say “Hey SeekR” before giving a new target. The phone
-keeps hands-free speech recognition active and sends matching
-wake-word commands or answers to spoken prompts to the dashboard. Browsers
-without built-in speech recognition use voice activity detection and the
-backend’s ElevenLabs Scribe transcription endpoint. Keep the phone page in the
-foreground; mobile browsers may suspend microphone recognition when the page is
-backgrounded or the screen is locked. The dashboard also has a manual target
-field for debugging when voice input is unavailable.
+When `ELEVENLABS_API_KEY` is configured, SeekR uses ElevenLabs Scribe for
+transcription, with voice activity detection to send each spoken turn. Browser
+speech recognition is used when ElevenLabs is not configured or transcription
+fails. After the first target, say “Hey SeekR” before giving a new target. Keep
+the phone page in the foreground; mobile browsers may suspend microphone
+recognition when the page is backgrounded or the screen is locked. The dashboard
+also has a manual target field for debugging when voice input is unavailable.
 
 ## Phase 1 candidate traversability mask
 

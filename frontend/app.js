@@ -265,33 +265,19 @@ async function requestRouteForFrame(maskResult, perception, isCurrent) {
     perception, state.lastPerceptionMeta);
 }
 
-// Keep navigation requests focused on concrete, recognizable items. The final
-// word is the item class; preceding words may describe its appearance.
-const ITEM_NOUNS = new Set((
-  'key keys keychain wallet purse handbag backpack bag tote suitcase box package envelope cup cups mug mugs '
-  +'glass glasses bottle bottles flask thermos bowl bowls plate plates dish spoon fork knife pan pot kettle '
-  +'toaster blender microwave refrigerator fridge freezer oven coffeemaker maker hoodie hoodies jacket coat shirt '
-  +'tshirt sweater sweatshirt pants jeans shorts dress skirt sock socks shoe shoes sneaker sneakers boot boots '
-  +'sandal hat cap scarf glove gloves belt tie book books notebook binder folder paper pen pencil marker crayon '
-  +'eraser ruler stapler scissors calculator phone smartphone cellphone tablet laptop computer keyboard mouse monitor '
-  +'headphone headphones earbud earbuds charger cable cord adapter remote controller camera watch sunglasses case '
-  +'chair table tables lamp desk shelf mirror towel blanket pillow sheet comforter toy doll ball toothbrush toothpaste comb brush '
-  +'hairbrush razor soap shampoo deodorant lotion apple banana orange pear snack can jar tin container bowl '
-  +'umbrella flashlight torch battery batteries powerbank power bank headphones ring necklace bracelet earring earrings '
-  +'tool hammer screwdriver wrench pliers drill tape glue paintbrush paintbrushes shoehorn couch sofa dresser cabinet drawer nightstand bed sign signs sanitizer '
-  +'stroller bicycle bike helmet headphones'
-).split(/\s+/));
-const TARGET_NON_ITEM_WORDS = new Set((
-  'in on under beneath below above behind beside near next to inside outside around toward towards through room '
-  +'kitchen bathroom bedroom hallway hall floor upstairs downstairs door doorway exit entrance window garage '
-  +'someone person people man woman child dog cat end task session navigation finish stop find locate look '
-  +'holding wearing carrying bring take go get please i me my we you your our their them this that these those '
-  +'need want would could should give send move put place someone somebody and or then'
+// Accept short item descriptions without requiring the noun to appear in a
+// finite catalog. Filter out obvious sentence/control words so full requests
+// do not accidentally become the target.
+const TARGET_SENTENCE_WORDS = new Set((
+  'i me we you he she they it my our your his her their this that these those '
+  +'am is are was were be been being do does did have has had want need would could should will '
+  +'please find locate looking get take bring carry move put give send end exit task session navigation finish stop '
+  +'and or but because while when who what where why'
 ).split(/\s+/));
 function isItemDescription(target) {
   const words = target.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').trim().split(/\s+/).filter(Boolean);
-  if (!words.length || words.length > 6 || !ITEM_NOUNS.has(words.at(-1))) return false;
-  return !words.some(word => TARGET_NON_ITEM_WORDS.has(word));
+  if (!words.length || words.length > 6) return false;
+  return !words.some(word => TARGET_SENTENCE_WORDS.has(word));
 }
 
 async function analyzeLocalRouteFrame() {
