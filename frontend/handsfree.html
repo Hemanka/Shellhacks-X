@@ -1,0 +1,10 @@
+<!doctype html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Wayfinder · Hands-free test</title><link rel="stylesheet" href="/mobile.css"><style>[hidden]{display:none!important}</style></head>
+<body><main id="setup"><p class="brand">WAYFINDER</p><h1>Hands-free test</h1>
+<p>Allow camera, microphone, orientation, and spoken audio. After setup this screen becomes empty.</p>
+<p>Say “Hey Wayfinder” followed by what you want to find, pause, resume, repeat, got it, lost it, or too far.</p>
+<p>Detected speech is sent to ElevenLabs for transcription before checking the wake phrase. Nearby conversations may be sent too. Audio and ignored transcripts are not saved by this app.</p>
+<p>Keep this page open and your phone unlocked. Background operation is not guaranteed.</p>
+<p id="status" role="status">Ready to enable permissions.</p><button id="allow-permissions">Enable hands-free</button></main>
+<video id="phone-video" class="capture-video" autoplay muted playsinline aria-hidden="true" tabindex="-1"></video>
+<script src="/orientation.js"></script><script src="/feedback.js"></script><script src="/speech.js"></script><script src="/intent.js"></script><script src="/handsfree-audio.js"></script><script src="/handsfree.js"></script></body></html>

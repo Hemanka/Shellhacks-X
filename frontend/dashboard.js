@@ -14,7 +14,7 @@ function debugEvent(kind, data = {}) {
     const text = document.createElement('span'); text.textContent = `${entry.kind} · ${JSON.stringify(Object.fromEntries(Object.entries(entry).filter(([key]) => !['time', 'kind'].includes(key))))}`;
     row.append(time, text); list.append(row);
   }
-  if (kind === 'speech input') debugText('speech-input', data.transcript);
+  if (kind === 'speech input') { debugText('speech-input', data.transcript); if(data.intent) {debug.intent=data.intent;debugText('parsed-intent',JSON.stringify(data.intent));} }
   if (kind === 'speech output') debugText('speech-output', data.text);
   if (kind.includes('error')) debugText('last-error', data.message || data.detail || kind);
 }
@@ -98,7 +98,10 @@ async function pairPhoneCamera() {
     phoneDisconnected();
     debugElement('pairing-qr').src = pairing.qr_data_url;
     debugElement('phone-link').href = pairing.mobile_url;
-    debugText('phone-link', pairing.mobile_url);
+    debugText('phone-link', 'Open Standard');
+    debugElement('handsfree-qr').src = pairing.handsfree_qr_data_url;
+    debugElement('handsfree-link').href = pairing.handsfree_url;
+    debugText('handsfree-link', 'Open Hands-free');
     debugText('pairing-hint', pairing.secure ? 'Scan, allow camera and microphone, then speak on the phone.' : 'HTTPS is required for phone permissions. Start with a tunnel or enter its HTTPS address above.');
     const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
     const socket = new WebSocket(`${protocol}://${location.host}/ws/pair/${pairing.session_id}?role=pc`);
@@ -150,7 +153,10 @@ async function pairPhoneCamera() {
             if (message.speech) debugText('speech-state', message.speech);
             if (message.haptics || message.orientation) debugText('feedback-state',message.haptics || message.orientation);
             if (message.speech === 'fallback' || message.speech === 'blocked') debugEvent('speech error', { detail: message.detail });
-          debugEvent('phone status', message);
+          const audioKeys=['audio_activity','audio_settings','clip_ms','transcription_ms','wake','command_window','echo','dropped_clips','parsed_intent'];
+          const audio=Object.fromEntries(audioKeys.filter(key=>key in message).map(key=>[key,message[key]]));
+          if(Object.keys(audio).length) { debug.audio={...debug.audio,...audio}; debugText('handsfree-diagnostics',JSON.stringify(debug.audio,null,2)); }
+          else debugEvent('phone status', message);
         } else if (message.type === 'control') {
           if ((message.action === 'pause' && state.running) || (message.action === 'resume' && !state.running)) await startSession();
           publishSession();
@@ -166,7 +172,7 @@ debugElement('target-form').addEventListener('submit', event => {
 });
 debugElement('clear-events').addEventListener('click', () => { debug.events = []; debugElement('event-log').replaceChildren(); });
 debugElement('export-debug').addEventListener('click', () => {
-  const blob = new Blob([JSON.stringify({ exportedAt: new Date().toISOString(), result: debug.lastResult, mask: debug.lastMask, events: debug.events, controller:debug.controller, observations:navigation?.history }, null, 2)], { type: 'application/json' });
+  const blob = new Blob([JSON.stringify({ exportedAt: new Date().toISOString(), result: debug.lastResult, mask: debug.lastMask, events: debug.events, controller:debug.controller, observations:navigation?.history, intent:debug.intent }, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob); const link = document.createElement('a');
   link.href = url; link.download = 'wayfinder-debug.json'; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
 });

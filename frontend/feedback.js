@@ -37,7 +37,7 @@
       this.display(cue); this.queue=null;
       if(cue.type==='hazard') { this.interrupt(); this.warning(); }
       const sameAction=this.active?.key===cue.key;
-      const ordinary=this.active && this.speech.busy && cue.priority>1 && sameAction;
+      const ordinary=this.active && this.speech.busy && cue.priority>1 && (sameAction || this.active.key==='target-found');
       if (ordinary) { this.queue=cue; return; }
       this.play(cue);
     }

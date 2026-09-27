@@ -58,12 +58,16 @@ async def create_pairing(request: Request, payload: PairingRequest | None = None
     session_id = uuid.uuid4().hex
     sessions[session_id] = PairingSession()
     mobile_url = f"{origin}/mobile.html?session={session_id}"
-    output = BytesIO()
-    qrcode.make(mobile_url).save(output, format="PNG")
+    handsfree_url = f"{origin}/handsfree.html?session={session_id}"
+    def qr(url):
+        output = BytesIO()
+        qrcode.make(url).save(output, format="PNG")
+        return "data:image/png;base64," + base64.b64encode(output.getvalue()).decode("ascii")
     return {
         "session_id": session_id, "mobile_url": mobile_url,
         "secure": origin.startswith("https://"),
-        "qr_data_url": "data:image/png;base64," + base64.b64encode(output.getvalue()).decode("ascii"),
+        "qr_data_url": qr(mobile_url),
+        "handsfree_url": handsfree_url, "handsfree_qr_data_url": qr(handsfree_url),
     }
 
 
@@ -101,7 +105,7 @@ def relay_message(role: str, message: object) -> dict | None:
         if kind == "listening" and isinstance(message.get("active"), bool):
             return {"type": kind, "active": message["active"]}
         if kind == "phone_status":
-            allowed = ("camera", "microphone", "speech", "detail", "orientation", "haptics")
+            allowed = ("camera", "microphone", "speech", "detail", "orientation", "haptics", "audio_activity", "audio_settings", "clip_ms", "transcription_ms", "wake", "command_window", "echo", "dropped_clips", "parsed_intent")
             result = {"type": kind}
             for key in allowed:
                 value = message.get(key)
@@ -155,6 +159,8 @@ async def pairing_socket(websocket: WebSocket, session_id: str, role: str = "mob
     previous = session.peers[role]
     session.peers[role] = websocket
     if previous:
+        await send(session, "pc" if role == "mobile" else "mobile",
+                   {"type": "peer_status", "role": role, "connected": False})
         await previous.close(code=1000)
     other = "pc" if role == "mobile" else "mobile"
     await send(session, role, {"type": "peer_status", "role": other, "connected": session.peers[other] is not None})
@@ -162,6 +168,8 @@ async def pairing_socket(websocket: WebSocket, session_id: str, role: str = "mob
     try:
         while True:
             message = await websocket.receive_json()
+            if session.peers[role] is not websocket:
+                break
             payload = relay_message(role, message)
             if payload:
                 await send(session, other, payload)

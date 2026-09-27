@@ -20,3 +20,10 @@ test('incremental cue survives slow speech preparation but pause still cancels i
  const h=harness();h.f.accept(h.cue({expiresAt:null}));h.advance(60000);
  assert.equal(h.f.valid(h.f.active),true);h.f.session(1,'s',false);assert.equal(h.f.active,null);
 });
+
+test('found finishes before next routine cue while hazards interrupt immediately',()=>{
+ const h=harness();h.f.accept(h.cue({type:'guidance',key:'target-found',priority:2,text:'Cup found.',expiresAt:null}));
+ h.f.accept(h.cue({id:'2',type:'guidance',key:'route:FORWARD',priority:2,text:'Short step forward.',expiresAt:null}));
+ assert.equal(h.spoken.length,1);assert.equal(h.f.queue.id,'2');
+ h.f.accept(h.cue({id:'3',key:'route:obstacle',text:'Stop. Chair ahead.'}));assert.equal(h.f.queue,null);assert.equal(h.spoken.at(-1),'Stop. Chair ahead.');
+});

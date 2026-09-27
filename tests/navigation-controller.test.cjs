@@ -27,7 +27,7 @@ test('separate close obstruction prevents pickup and names obstacle',()=>{const 
 test('hazards repeat only on newer evidence at four second intervals',()=>{const h=harness();h.observe({obstacles:[close()]});h.advance(500);h.observe({obstacles:[close()]});assert.equal(h.outputs.length,1);h.advance(4000);h.observe({obstacles:[close()]});assert.equal(h.outputs.length,2);});
 test('hazard clearing needs two clear assessments',()=>{const h=harness();h.observe({obstacles:[close()]});h.advance(500);h.observe();assert.ok(h.c.hazard);h.advance(500);h.observe();assert.equal(h.c.hazard,null);assert.ok(h.outputs.some(x=>x.type==='cancel_hazard'));});
 test('unknown identity is not invented and target is named as target',()=>{const h=harness();h.observe({obstacles:[close('separate','')]});assert.match(h.last().text,/an obstacle/);});
-test('pickup loss asks for confirmation, not automatic success',()=>{const h=harness();h.c.pickupPending=true;h.c.stage='PICKUP';h.observe({target:{visible:false}});assert.match(h.last().text,/Did you pick it up/);assert.equal(h.c.stage,'PICKUP');h.c.command('lost it',h.now());assert.equal(h.c.pickupPending,false);});
+test('pickup loss asks for confirmation, not automatic success',()=>{const h=harness();h.c.pickupPending=true;h.c.stage='PICKUP';h.observe({target:{visible:false}});assert.match(h.last().text,/Picked up/);assert.equal(h.c.stage,'PICKUP');h.c.command('lost it',h.now());assert.equal(h.c.pickupPending,false);});
 test('cannot reach exits pickup; done outside pickup does not change target',()=>{const h=harness();h.c.pickupPending=true;assert.equal(h.c.command("can't reach it",h.now()),'handled');assert.equal(h.c.pickupPending,false);assert.equal(h.c.command('done',h.now()),'handled');assert.equal(h.c.target,'bottle');assert.notEqual(h.c.stage,'COMPLETE');});
 test('door and big bbox alone do not establish pickup',()=>{const h=harness();h.observe({target:{...h.scene().perception.target,pickupSuitable:false,bbox:[0,0,1,1]},access:{approach:'clear',reach:'clear',reachability:'uncertain',evidence:'Door occupies image'}});assert.notEqual(h.c.stage,'PICKUP');});
 test('recent viewing orientation corrects right overshoot left without another model',()=>{const h=harness();h.observe({access:{approach:'uncertain'}});h.advance(500);h.observe({target:{visible:false}},100,30);h.advance(301);h.c.tick(h.now(),h.orientation(30));assert.equal(h.last().stage,'RECOVER');assert.match(h.last().text,/left/);});
@@ -44,7 +44,7 @@ test('slow results remain valid when no movement instruction intervened',()=>{
 test('blank camera prompts a clearer view rather than blaming latency',()=>{
  const h=harness();const meta={stream:'s',seq:1,capturedAt:h.now()-50,orientation:null};
  h.c.observe({...h.scene(),source:'insufficient_image'},meta,h.now(),h.orientation());
- assert.equal(h.last().key,'camera-detail');assert.match(h.last().text,/too little detail/);
+ assert.equal(h.last().key,'camera-detail');assert.match(h.last().text,/scan the room/);
 });
 test('old target-missing result encourages search without walking',()=>{
  const h=harness();h.observe({target:{visible:false}},11000);
@@ -129,7 +129,7 @@ test('mask route cannot bypass pickup or move without a target',()=>{
  const n=h.outputs.length;h.advance(9000);h.mask();assert.equal(h.outputs.length,n);
 });
 test('NVIDIA turns need two consistent masks',()=>{
- const h=routeHarness();h.observe();const r=[{direction:'LEFT',action:'TURN_LEFT'}];h.mask(r);assert.equal(h.outputs.length,0);
+ const h=routeHarness();h.observe();const r=[{direction:'LEFT',action:'TURN_LEFT'}];h.mask(r);assert.equal(h.outputs.filter(x=>x.physical).length,0);
  h.advance(500);h.mask(r);assert.equal(h.last().stage,'ALIGN');
 });
 
@@ -137,14 +137,14 @@ test('named warning needs blocked floor path and near-center obstacle overlap',(
  const h=routeHarness();h.observe({obstacles:[{...close('separate','chair'),bbox:[.4,.4,.7,.95]}]});
  h.mask([]);assert.equal(h.last().type,'hazard');assert.match(h.last().text,/chair/);
 });
-test('lost target suspends mask walking until reacquired',()=>{
+test('lost target permits one remaining bounded step',()=>{
  const h=routeHarness();h.observe();h.mask();h.advance(1000);h.observe({target:{visible:false}});
- const n=h.outputs.length;h.advance(9000);h.mask();assert.equal(h.outputs.length,n);
+ const n=h.outputs.length;h.advance(9000);h.mask();assert.equal(h.outputs.length,n+1);assert.equal(h.c.detour.steps,1);
 });
 test('turning away from remembered target prevents NVIDIA following old target coordinates',()=>{
  const h=routeHarness();h.observe();h.advance(1000);
  h.c.observeRoute({pathPlan:{routes:[{direction:'CENTER',action:'FORWARD'}]}},{stream:'s',seq:10,capturedAt:h.now()-20,orientation:h.orientation(40)},h.now(),h.orientation(40));
- assert.equal(h.last().key,'route:relocalize');assert.equal(h.c.routeScene,null);
+ assert.equal(h.last().key,'route:FORWARD');assert.equal(h.c.detour.reacquiring,false);
 });
 
 test('incomplete reach assessment cannot latch out a valid NVIDIA approach',()=>{
@@ -177,4 +177,74 @@ test('likely reachable never authorizes pickup or stalls a clear NVIDIA route',(
 test('legacy guidance also requires easy reach, not merely likely reach',()=>{
  const h=harness();const access={approach:'clear',reach:'clear',reachability:'likely_reachable',evidence:'Could maybe reach'};
  h.observe({access});h.advance(500);h.observe({access});assert.notEqual(h.last().stage,'PICKUP');
+});
+
+const {gridCell}=require('../frontend/navigation-controller.js');
+test('nine grid cells, exact boundaries, outer edges, and invalid boxes',()=>{
+ const labels=[['upper left','upper center','upper right'],['middle left','center','middle right'],['lower left','lower center','lower right']];
+ for(let r=0;r<3;r++)for(let c=0;c<3;c++){const x=(c+.5)/3,y=(r+.5)/3;assert.equal(gridCell([x,y,x,y]),labels[r][c]);}
+ assert.equal(gridCell([1/3,1/3,1/3,1/3]),'center');assert.equal(gridCell([2/3,2/3,2/3,2/3]),'lower right');assert.equal(gridCell([1,1,1,1]),'lower right');assert.equal(gridCell(null),null);
+});
+test('bounded detour reacquires and then resumes approach and pickup',()=>{
+ const h=routeHarness();h.observe();h.mask();h.advance(1000);h.observe({target:{visible:false}});
+ for(let i=0;i<4;i++){h.advance(9000);h.mask();}assert.equal(h.c.detour.steps,4);
+ h.advance(9000);h.mask();assert.equal(h.last().stage,'RECOVER');assert.equal(h.last().physical,false);
+ h.advance(1000);h.observe();assert.equal(h.c.detour.steps,0);assert.equal(h.last().key,'target-found');
+ const access={reach:'clear',reachability:'easily_reachable',evidence:'Comfortable reach'};
+ h.advance(1000);h.observe({access});h.advance(1000);h.observe({access});assert.equal(h.last().stage,'PICKUP');assert.match(h.last().text,/center in view/);
+});
+test('missing orientation blocks unseen detours and requests stationary scan',()=>{
+ const h=routeHarness();h.observe();h.mask();h.c.destination.orientation=null;h.advance(1000);h.observe({target:{visible:false}});
+ assert.match(h.last().text,/scan left and right/);h.advance(9000);h.mask();assert.equal(h.last().stage,'RECOVER');
+});
+test('two unseen turns are bounded and repeat does not consume allowance',()=>{
+ const h=routeHarness();h.observe();h.advance(1000);h.observe({target:{visible:false}});
+ const r=[{direction:'LEFT',action:'TURN_LEFT'}];h.mask(r);h.advance(500);h.mask(r);assert.equal(h.c.detour.turns,1);
+ h.c.command('repeat',h.now());assert.equal(h.c.detour.turns,1);
+ h.advance(9000);h.mask(r);assert.equal(h.c.detour.turns,2);
+ h.advance(9000);h.mask(r);assert.equal(h.last().stage,'RECOVER');
+ const o={...h.orientation(),reference:'new'};h.advance(9000);h.c.reacquire(h.now(),o);assert.match(h.last().text,/scan left and right/);
+});
+test('blocked mask stops detour; pause clears destination and allowances',()=>{
+ const h=routeHarness();h.observe();h.mask();h.advance(1000);h.observe({target:{visible:false}});h.advance(1000);h.mask([]);
+ assert.equal(h.last().key,'route:blocked');assert.equal(h.c.detour.reacquiring,false);
+ h.advance(9000);h.mask();assert.equal(h.last().stage,'APPROACH');
+ h.c.invalidate('Session paused');assert.equal(h.c.destination,null);assert.equal(h.c.detour.steps,0);
+});
+test('missing box prevents pickup and repeated sightings announce found only once',()=>{
+ const h=routeHarness();h.observe();h.advance(500);h.observe();assert.equal(h.outputs.filter(x=>x.key==='target-found').length,1);
+ h.advance(1000);h.observe({target:{...h.scene().perception.target,bbox:null},access:{reach:'clear',reachability:'easily_reachable',evidence:'Close'}});
+ assert.equal(h.last().key,'pickup-view');assert.equal(h.c.pickupPending,false);
+});
+
+test('visible target navigation never consumes unseen detour allowance',()=>{
+ const h=routeHarness();h.observe();for(let i=0;i<6;i++){h.advance(9000);h.mask();}
+ assert.equal(h.c.detour.steps,0);assert.equal(h.last().stage,'APPROACH');
+});
+test('slow pre-step sightings refresh memory without announcing or authorizing pickup',()=>{
+ const h=routeHarness();h.observe();h.mask();h.advance(1000);
+ h.c.detour.reacquiring=true;h.c.detour.steps=4;const n=h.outputs.length;
+ h.observe({access:{reach:'clear',reachability:'easily_reachable',evidence:'Reach clear'}},2000);
+ assert.equal(h.c.detour.reacquiring,false);assert.equal(h.c.detour.steps,0);assert.equal(h.outputs.length,n);assert.equal(h.c.pickupPending,false);
+});
+
+test('floor ending at table enters surface inspection then grid pickup',()=>{
+ const h=routeHarness();const target={...h.scene().perception.target,support:'table'};
+ const obstacles=[{...close('target_support','table'),bbox:[0,.4,1,1]}];
+ h.observe({target,obstacles,access:{reach:'uncertain',reachability:'uncertain'}});h.mask([]);
+ assert.equal(h.last().key,'surface-check');assert.equal(h.c.surfaceInspection,true);
+ h.advance(1000);h.observe({target,obstacles,access:{reach:'uncertain',reachability:'uncertain'}});assert.equal(h.last().key,'surface-view');
+ h.advance(1000);h.mask([]);assert.equal(h.last().key,'surface-view');
+ const access={reach:'clear',reachability:'easily_reachable',evidence:'Cup at near table edge with comfortable clear reach'};
+ h.advance(1000);h.observe({target,obstacles,access});h.advance(1000);h.observe({target,obstacles,access});
+ assert.equal(h.last().stage,'PICKUP');assert.match(h.last().text,/in view, on the table/);
+});
+test('surface inspection is not arrival and allows approach when floor returns',()=>{
+ const h=routeHarness();const target={...h.scene().perception.target,support:'shelf'};
+ h.observe({target,access:{reachability:'needs_approach'}});h.mask([]);assert.equal(h.c.pickupPending,false);
+ h.advance(1000);h.mask();assert.equal(h.last().stage,'APPROACH');assert.equal(h.c.surfaceInspection,false);
+});
+test('separate near obstruction still warns at a supporting surface',()=>{
+ const h=routeHarness();h.observe({target:{...h.scene().perception.target,support:'table'},obstacles:[{...close(),bbox:[.3,.3,.7,.9]}]});h.mask([]);
+ assert.equal(h.last().type,'hazard');assert.equal(h.c.surfaceInspection,false);
 });

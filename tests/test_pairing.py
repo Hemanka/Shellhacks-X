@@ -24,6 +24,35 @@ class PairingTests(unittest.TestCase):
         self.assertEqual(result['mobile_url'], f"https://phone.example/mobile.html?session={result['session_id']}")
         self.assertTrue(result['qr_data_url'].startswith('data:image/png;base64,'))
 
+    def test_two_qrs_share_session_and_differ(self):
+        result = self.pair()
+        self.assertEqual(result['handsfree_url'], f"https://phone.example/handsfree.html?session={result['session_id']}")
+        self.assertTrue(result['handsfree_qr_data_url'].startswith('data:image/png;base64,'))
+        self.assertNotEqual(result['qr_data_url'], result['handsfree_qr_data_url'])
+        self.assertIn('handsfree-qr', self.client.get('/').text)
+        self.assertIn('handsfree-worklet', self.client.get('/handsfree.js').text)
+        self.assertIn('before checking the wake phrase', self.client.get('/handsfree.html').text)
+
+    def test_replacing_phone_notifies_disconnect_before_reconnect(self):
+        session = self.pair()['session_id']
+        with self.client.websocket_connect(f'/ws/pair/{session}?role=pc') as pc:
+            pc.receive_json()
+            with self.client.websocket_connect(f'/ws/pair/{session}?role=mobile') as old:
+                old.receive_json()
+                pc.receive_json()
+                with self.client.websocket_connect(f'/ws/pair/{session}?role=mobile') as new:
+                    self.assertFalse(pc.receive_json()['connected'])
+                    self.assertTrue(pc.receive_json()['connected'])
+                    self.assertTrue(new.receive_json()['connected'])
+                    new.send_json({'type': 'transcript', 'text': 'pause'})
+                    self.assertEqual(pc.receive_json()['text'], 'pause')
+
+    def test_audio_diagnostics_are_bounded_and_do_not_relay_background_text(self):
+        result = relay_message('mobile', {'type':'phone_status', 'wake':'ignored', 'audio_settings':'x'*500, 'raw_transcript':'private conversation'})
+        self.assertEqual(result['wake'], 'ignored')
+        self.assertEqual(len(result['audio_settings']), 300)
+        self.assertNotIn('raw_transcript', result)
+
     def test_tunnel_origin_from_environment(self):
         with patch.dict(os.environ, {'PAIR_BASE_URL': 'https://configured.example'}):
             result = self.client.post('/api/pairing').json()

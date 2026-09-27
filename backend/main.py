@@ -6,7 +6,7 @@ import uuid
 from io import BytesIO
 from pathlib import Path
 from time import perf_counter, time
-from typing import Any
+from typing import Any, Literal
 
 import requests
 from dotenv import load_dotenv
@@ -39,7 +39,7 @@ load_dotenv(ROOT / ".env.local")
 app = FastAPI(title="Wayfinder Gemini API", version="0.1.0")
 app.include_router(pairing_router)
 GEMINI_URL_TEMPLATE = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-DEFAULT_GEMINI_MODELS = ("gemini-3.1-flash-lite", "gemini-3.5-flash-lite")
+DEFAULT_GEMINI_MODELS = ("gemini-3.8-flash", "gemini-3.5-flash-lite")
 ELEVENLABS_URL = "https://api.elevenlabs.io/v1/text-to-speech"
 ELEVENLABS_STT_URL = "https://api.elevenlabs.io/v1/speech-to-text"
 DEFAULT_ELEVENLABS_VOICE_ID = "JBFqnCBsd6RMkjVDRZzb"
@@ -64,6 +64,7 @@ class FrameRequest(BaseModel):
     heading_deg: float = Field(default=0, ge=-360, le=360)
     capture_ms: float = Field(default=0, ge=0, le=60_000)
     frame_meta: FrameMeta | None = None
+    navigation_context: Literal["approach", "surface_pickup"] = "approach"
 
 
 class SpeechRequest(BaseModel):
@@ -376,7 +377,14 @@ def analyze_frame(payload: FrameRequest) -> dict[str, Any]:
                                  error="Camera view has too little visual detail; show the room and target.")
     body = {
         "contents": [{"parts": [
-            {"text": GEMINI_PERCEPTION_PROMPT.format(target=payload.target_object)},
+            {"text": GEMINI_PERCEPTION_PROMPT.format(target=payload.target_object) + (
+                "\nThe floor route has ended with the target visible on a supporting surface. "
+                "Assess the item, the near edge of its support, and the reaching space in THIS image. "
+                "No floor route does not prove arrival or reachability. The table or shelf is the destination, "
+                "not automatically a reach obstruction. A clear tabletop reach does not require visible floor. "
+                "Return easily_reachable only with evidence of a comfortable grasp without leaning or stretching; "
+                "otherwise return needs_approach or uncertain according to the actual view."
+                if payload.navigation_context == "surface_pickup" else "")},
             {"inline_data": {"mime_type": "image/jpeg", "data": base64.b64encode(image_bytes).decode("ascii")}},
         ]}],
         "generationConfig": {
@@ -410,7 +418,7 @@ def analyze_frame(payload: FrameRequest) -> dict[str, Any]:
             attempt_started = perf_counter()
             response = requests.post(
                 GEMINI_URL_TEMPLATE.format(model=model),
-                params={"key": api_key},
+                headers={"x-goog-api-key": api_key},
                 json=body,
                 timeout=12,
             )

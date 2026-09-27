@@ -70,26 +70,6 @@ function setInstruction(title, sub, confidence = null, announce = true, spokenTe
   if (announce && !state.listening) speak(spokenText ?? `${title} ${sub}`);
 }
 
-function cleanSpokenTarget(transcript) {
-  let target = transcript.trim().replace(/[.!?]+$/, "");
-  target = target.replace(
-    /^(?:(?:hey(?:\s+there)?|hi|hello|okay|ok|um+|uh+|well|wayfinder)[,\s]+)+/i,
-    "",
-  );
-  const prefixes = [
-    /^(?:please\s+)?(?:(?:can|could|would) you\s+)?(?:help me\s+)?(?:find|locate|look for)\s+(?:me\s+)?/i,
-    /^(?:please\s+)?(?:what\s+)?i\s+want\s+to\s+find\s+is\s+/i,
-    /^(?:please\s+)?i\s+(?:want|need|would like)(?:\s+you)?\s+to\s+(?:help\s+me\s+)?(?:find|locate|look for)\s+(?:me\s+)?/i,
-    /^(?:please\s+)?i(?:'m| am)\s+looking\s+for\s+/i,
-    /^(?:where is|where are)\s+/i,
-  ];
-  for (const prefix of prefixes) target = target.replace(prefix, "");
-  return target
-    .trim()
-    .replace(/^(?:a|an|the|my|some)\s+/i, "")
-    .replace(/\s+please$/i, "")
-    .trim();
-}
 
 function setTarget(target) {
   state.revision += 1;
@@ -318,6 +298,7 @@ async function analyzeFrame() {
       heading_deg: state.heading,
       capture_ms: captureMs,
       frame_meta: frameMeta,
+      navigation_context: navigation?.surfaceInspection ? 'surface_pickup' : 'approach',
     };
     if (state.remoteFrame) tickTraversability();
     else updateTraversability(requestBody, isCurrent);
@@ -413,7 +394,7 @@ async function startSession() {
     state.timer = setInterval(updateClock, 1000);
   }
   setInstruction(
-    "Stay in place and slowly pan your phone to scan the room.",
+    "Slowly scan the room.",
     `Looking for your ${targetInput.value}.`,
   );
   try {
@@ -472,7 +453,11 @@ async function startSession() {
 }
 async function useTranscript(transcript) {
   state.listening = false;
-  const command = navigation?.command(transcript, phoneNow());
+  const intent = window.parseIntent(transcript);
+  window.WayfinderDashboard?.event('speech input',{transcript, intent});
+  if(intent.type === 'clarification') { setInstruction('Which item?', '', null, true, 'Which item?'); return; }
+  if(intent.type === 'command' && intent.command === 'resume') { if(!state.running) await startSession(); return; }
+  const command = intent.type === 'command' ? navigation?.command(intent.command, phoneNow()) : null;
   if(command) {
     window.WayfinderDashboard?.event('speech input',{transcript,command});
     if(command==='pause' && state.running) await startSession();
@@ -484,14 +469,15 @@ async function useTranscript(transcript) {
     }
     return;
   }
-  const target = cleanSpokenTarget(transcript).slice(0, 100);
+  if(intent.type !== 'target') { setInstruction('Which item?', '', null, true, 'Which item?'); return; }
+  const target = intent.target;
   if (!target) throw new Error('No target was recognized.');
   state.listening = false;
   setTarget(target);
   window.WayfinderDashboard?.event('speech input', { transcript, target });
   if (state.running) {
     sendToPhone({ type: 'session_state', running: true, target, revision:navigation?.revision ?? 0 });
-    setInstruction('Target updated.', 'Looking for ' + target + '.');
+    setInstruction('Looking for ' + target + '.', '');
     await analyzeFrame();
   } else if (state.cameraActive) {
     await startSession();

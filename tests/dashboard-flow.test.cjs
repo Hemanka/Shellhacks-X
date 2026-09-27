@@ -47,7 +47,7 @@ async function dashboardHarness(modern = false) {
     },
     setInterval: (fn,ms) => {intervals.push({fn,ms});return intervals.length;}, clearInterval() {}, setTimeout() {}, clearTimeout() {},
   });
-  for (const file of [...(modern?['navigation-controller.js']:[]),'app.js', 'dashboard.js']) vm.runInContext(fs.readFileSync(path.join(__dirname, '../frontend', file), 'utf8'), context);
+  for (const file of [...(modern?['navigation-controller.js']:[]),'intent.js', 'app.js', 'dashboard.js']) vm.runInContext(fs.readFileSync(path.join(__dirname, '../frontend', file), 'utf8'), context);
   vm.runInContext('globalThis.sessionState = state;', context);
   await new Promise(setImmediate);
   socket.onopen();
@@ -91,7 +91,7 @@ test('current dashboard sends frame-linked expiring instructions with the sessio
   h.state.nextMaskAt=0;
   await h.message({type:'frame',image_base64:'data:image/jpeg;base64,test',meta:{...meta,seq:2,capturedAt:performance.now()}});
   vm.runInContext('tickTraversability()',h.context);await new Promise(setImmediate);
-  const cue=h.outbound.find(x=>x.id && x.stage==='APPROACH');
+  const cue=h.outbound.find(x=>x.id && x.key==='route:FORWARD');
   assert.ok(cue);assert.equal(cue.evidenceFrame,2);assert.equal(cue.stream,'phone');
   assert.equal(cue.expiresAt,null);
   assert.ok(h.outbound.some(x=>x.type==='session_state' && x.revision===cue.revision));
@@ -112,4 +112,13 @@ test('brief camera gap does not pause; long gap recovers automatically',async()=
  await h.message({type:'frame',image_base64:'data:image/jpeg;base64,test',meta:{stream:'phone',seq:2,capturedAt:performance.now()}});
  assert.equal(vm.runInContext('debug.cameraInterrupted',h.context),false);
  assert.equal(h.state.running,true);
+});
+
+test('polite requests parse to targets and ambiguous requests preserve current target',async()=>{
+ const h=await dashboardHarness(true);
+ await h.message({type:'transcript',text:'Could we find the red cup?'});
+ assert.equal(h.elements.get('target-display').textContent,'red cup');
+ await h.message({type:'transcript',text:'Find the cup or bottle'});
+ assert.equal(h.elements.get('target-display').textContent,'red cup');
+ assert.ok(h.outbound.some(x=>x.text==='Which item?'));
 });

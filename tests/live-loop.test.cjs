@@ -46,6 +46,7 @@ function harness() {
     decisions,
     instructions,
   });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../frontend/intent.js'), 'utf8'), context);
   vm.runInContext(source + `
     const presentDecision = applyNavigationDecision;
     connectCamera = async () => true;
