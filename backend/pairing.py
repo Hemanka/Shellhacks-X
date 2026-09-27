@@ -101,7 +101,7 @@ def relay_message(role: str, message: object) -> dict | None:
         if kind == "listening" and isinstance(message.get("active"), bool):
             return {"type": kind, "active": message["active"]}
         if kind == "phone_status":
-            allowed = ("camera", "microphone", "speech", "detail", "orientation", "haptics")
+            allowed = ("camera", "microphone", "speech", "transcriber", "detail", "orientation", "haptics")
             result = {"type": kind}
             for key in allowed:
                 value = message.get(key)

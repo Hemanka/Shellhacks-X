@@ -27,6 +27,16 @@ The optional HTTPS field on the dashboard can also regenerate the QR link. A
 stable branded HTTPS address requires a domain and a configured Cloudflare
 tunnel; the automatic quick tunnel provides a temporary address instead.
 
+The launcher creates a fresh Quick Tunnel each time and prints its phone HTTPS
+base URL after Cloudflare confirms the tunnel is connected. If a phone says the
+site cannot be reached, compare the hostname in the QR link with the printed
+base URL, then choose **Generate new QR code** on the dashboard. The current
+tunnel connection is recorded in `.runtime/tunnel.log`; backend startup and
+health logs are in `.runtime/server.log`. Restart the launcher to replace an
+expired tunnel and its QR link. Run the launcher rather than starting Uvicorn
+directly so the server receives the current tunnel URL and both processes are
+stopped together.
+
 The launcher installs the small dashboard dependencies from
 `requirements-web.txt`. Add your API keys to `.env` or `.env.local` before live use. To enable
 the SegFormer overlay, install the full model dependencies separately:

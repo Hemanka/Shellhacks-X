@@ -50,7 +50,16 @@ def main():
         environment["HF_HOME"] = str(cached_hf_home)
     flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     try:
-        public_url = args.phone_url or environment.get("PAIR_BASE_URL")
+        # --tunnel means "create a fresh Quick Tunnel". Ignore an inherited
+        # PAIR_BASE_URL in that mode: it may be a hostname from an older,
+        # already-expired Quick Tunnel. Use --phone-url for an intentional
+        # external/stable HTTPS address instead.
+        if args.phone_url:
+            public_url = args.phone_url
+        elif args.tunnel and not args.no_tunnel:
+            public_url = None
+        else:
+            public_url = environment.get("PAIR_BASE_URL")
         tunnel_path = ROOT / "cloudflared.exe"
         if not public_url and args.tunnel and not args.no_tunnel:
             if not tunnel_path.exists():
@@ -65,15 +74,17 @@ def main():
             processes.append(tunnel)
             deadline = time.monotonic() + 45
             while time.monotonic() < deadline:
-                match = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", log_path.read_text(encoding="utf-8", errors="replace"))
-                if match:
+                tunnel_output = log_path.read_text(encoding="utf-8", errors="replace")
+                match = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", tunnel_output)
+                connected = "Registered tunnel connection" in tunnel_output
+                if match and connected:
                     public_url = match.group(0)
                     break
                 if tunnel.poll() is not None:
-                    raise RuntimeError("Phone tunnel could not start. See .runtime/tunnel.log.")
+                    raise RuntimeError("Cloudflare Quick Tunnel exited before connecting. See .runtime/tunnel.log.")
                 time.sleep(.25)
             if not public_url:
-                raise RuntimeError("Phone tunnel timed out. See .runtime/tunnel.log or supply --phone-url.")
+                raise RuntimeError("Cloudflare Quick Tunnel did not connect within 45 seconds. See .runtime/tunnel.log.")
         if public_url:
             environment["PAIR_BASE_URL"] = public_url
         server_log = (runtime / "server.log").open("w", encoding="utf-8")
@@ -97,12 +108,13 @@ def main():
             raise RuntimeError("Server startup timed out. See .runtime/server.log.")
         print(f"Dashboard ready: {local_url}", flush=True)
         if public_url:
-            print("HTTPS phone connection ready. Scan the dashboard QR code.", flush=True)
+            print(f"Phone HTTPS base URL: {public_url}", flush=True)
+            print("Cloudflare tunnel connected. Scan the QR code shown on this dashboard.", flush=True)
         if not args.no_browser:
             webbrowser.open(local_url)
         while server.poll() is None and not stop_file.exists():
             if len(processes) > 1 and processes[0].poll() is not None:
-                raise RuntimeError("Phone tunnel stopped. Restart the launcher to reconnect.")
+                raise RuntimeError("Cloudflare tunnel stopped; its QR link is no longer live. Restart the launcher for a fresh link. See .runtime/tunnel.log.")
             time.sleep(.5)
     except KeyboardInterrupt:
         pass

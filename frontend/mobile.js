@@ -2,7 +2,7 @@ const phone = {
   socket: null, stream: null, frameTimer: null, dashboard: false, running: false,
   listening: false, lastGuidance: '', connecting: false, handsFree: false,
   recognizer: null, recognizerStarting: false, speechSuspended: false,
-  transcriber: 'detecting', elevenLabsConfigured: false,
+  transcriber: 'detecting', elevenLabsConfigured: false, elevenLabsFailed: false,
   awaitingResponse: false, awaitingInitialItem: false, hasTarget: false,
   wakeArmedUntil: 0, recorder: null, audioContext: null, analyser: null,
   audioFrame: 0, audioInspect: null, transcribing: false,
@@ -25,6 +25,7 @@ function updateListeningStatus(text = `${phone.transcriber === 'elevenlabs' ? 'E
 }
 async function selectTranscriber() {
   phone.transcriber = 'detecting';
+  phone.elevenLabsFailed = false;
   try {
     const response = await fetch('/api/health', { cache: 'no-store' });
     if (!response.ok) throw new Error(`Health check returned ${response.status}`);
@@ -240,7 +241,7 @@ function startHandsFree() {
     if (phone.recognizer !== recognizer) return;
     phone.recognizer = null; phone.recognizerStarting = false;
     if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
-      if (phone.elevenLabsConfigured) {
+      if (phone.elevenLabsConfigured && !phone.elevenLabsFailed) {
         phone.transcriber = 'elevenlabs';
         updateListeningStatus('Switching to ElevenLabs Scribe.');
         startElevenLabsListener();
@@ -260,7 +261,7 @@ function startHandsFree() {
   };
   try { recognizer.start(); } catch {
     phone.recognizer = null; phone.recognizerStarting = false;
-    if (phone.elevenLabsConfigured) { phone.transcriber = 'elevenlabs'; startElevenLabsListener(); }
+    if (phone.elevenLabsConfigured && !phone.elevenLabsFailed) { phone.transcriber = 'elevenlabs'; startElevenLabsListener(); }
     else { phone.transcriber = 'unavailable'; startHandsFree(); }
   }
 }
@@ -336,6 +337,7 @@ function finishFallbackUtterance() { clearTimeout(phone.silenceTimer); phone.sil
 async function transcribeWithElevenLabs(blob) {
   if (phone.transcribing) return;
   phone.transcribing = true;
+  let startBrowserFallback = false;
   try {
     const form = new FormData(); form.append('file',blob,`voice-command.${blob.type.includes('mp4')?'mp4':blob.type.includes('ogg')?'ogg':'webm'}`);
     const response = await fetch('/api/transcribe',{method:'POST',body:form});
@@ -347,13 +349,23 @@ async function transcribeWithElevenLabs(blob) {
   } catch (error) {
     setDashboardListening(false);
     if (error.status === 422) { updateListeningStatus('I didn’t catch that. Please say it again.'); return; }
-    // Keep the ElevenLabs listener alive and retry on the next spoken turn.
-    // A transient network or quota error must not silently switch providers
-    // and disable the expected wake-phrase path.
-    updateListeningStatus(`ElevenLabs transcription failed. Keep listening and try again. ${error.message || ''}`.trim());
-    sendPhone({type:'phone_status',transcriber:'elevenlabs',detail:error.message || 'ElevenLabs transcription failed; listener remains active'});
+    phone.elevenLabsFailed = true;
+    if (browserRecognitionAvailable()) {
+      // A configured API key does not guarantee that Scribe is reachable or
+      // has credits. Release the recorder/VAD path and keep listening with the
+      // browser's native recognizer instead of silently retrying a dead API.
+      stopFallbackCapture();
+      phone.transcriber = 'browser';
+      updateListeningStatus('ElevenLabs transcription failed. Browser speech is on; please say that again.');
+      sendPhone({type:'phone_status',transcriber:'browser',detail:`ElevenLabs transcription failed (${error.status || 'network'}); switched to browser speech recognition`});
+      startBrowserFallback = true;
+    } else {
+      updateListeningStatus(`ElevenLabs transcription failed and browser speech recognition is unavailable. Keep listening and try again. ${error.message || ''}`.trim());
+      sendPhone({type:'phone_status',transcriber:'elevenlabs',detail:error.message || 'ElevenLabs transcription failed; browser recognition is unavailable'});
+    }
   } finally {
     phone.transcribing = false;
+    if (startBrowserFallback) startHandsFree();
   }
 }
 el('allow-permissions').addEventListener('click', async () => {
